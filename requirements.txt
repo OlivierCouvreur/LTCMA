@@ -1,10 +1,12 @@
 streamlit
 numpy
 pandas
-matplotlib
+matplotlib.pyplot
+matplotlib.ticker
 io
 sys
-scipy
+scipy.stats
+scipy.optimize
 pathlib
 pickle
 base64
