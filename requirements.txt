@@ -2,9 +2,4 @@ streamlit
 numpy
 pandas
 matplotlib>=3.5
-io
-sys
 scipy
-pathlib
-pickle
-base64
