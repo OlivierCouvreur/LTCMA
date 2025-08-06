@@ -202,7 +202,7 @@ with st.sidebar.expander("Historical Scenario Analysis"):
             selected_scenario = st.selectbox("Select Scenario", scenario_names)
 
 # v3.1  Save / Restore controls
-col_save, col_restore = st.columns([1, 1])
+col_save, col_restore , col_dummy = st.columns([1, 1, 2])
 
 with col_save:
     if st.button("💾 Save Session", key="save_session_main"):
@@ -897,6 +897,7 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
                 mime="image/png",
                 key="download_drawdown_tab"
             )
+
 
 
 
