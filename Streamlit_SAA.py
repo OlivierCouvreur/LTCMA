@@ -75,10 +75,10 @@ Author:
 import streamlit as st
 import pandas as pd
 import numpy as np
+import sys
 import matplotlib
 matplotlib.use('Agg')  # explicitly set backend
 import matplotlib.pyplot as plt
-import sys
 from matplotlib.ticker import FuncFormatter
 from io import BytesIO
 from scipy.optimize import minimize
@@ -86,6 +86,12 @@ from scipy.stats import t
 from pathlib import Path  # For safer file suffix handling
 import pickle
 import base64
+
+
+# ---- default data files (edit paths as needed) ----
+DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
+DEFAULT_CORR_PATH = "Data/Correlation Matrix.xlsx"
+DEFAULT_SCENARIO_PATH = "Data/Scenarios.xlsx"
 
 
 st.set_page_config(layout="wide")
@@ -195,28 +201,62 @@ with st.sidebar.expander("Historical Scenario Analysis"):
             scenario_names = scenarios_df.iloc[:, 0].astype(str).tolist()
             selected_scenario = st.selectbox("Select Scenario", scenario_names)
 
+# v3.1  Save / Restore controls
+col_save, col_restore = st.columns([1, 1])
 
-            
-# Saving the Session including parameters
-if st.button("💾 Save Session", key="save_session_main"):
-    session_data = {
-        "ltcma_df": st.session_state["ltcma_df"],
-        "corr_matrix": st.session_state["corr_matrix"],
-        "optimized_weights": st.session_state.get("optimized_weights", None),
-        "sim_params": {
-            "start_date": st.session_state["start_date"],
-            "n_years": st.session_state["n_years"],
-            "initial_value": st.session_state["initial_value"],
-            "frequency": st.session_state["frequency"],
-            "n_sims": st.session_state["n_sims"],
-            "use_optimized_weights": st.session_state["use_optimized_weights"]
+with col_save:
+    if st.button("💾 Save Session", key="save_session_main"):
+        session_data = {
+            "ltcma_df": st.session_state["ltcma_df"],
+            "corr_matrix": st.session_state["corr_matrix"],
+            "optimized_weights": st.session_state.get("optimized_weights", None),
+            "sim_params": {
+                "start_date": st.session_state["start_date"],
+                "n_years": st.session_state["n_years"],
+                "initial_value": st.session_state["initial_value"],
+                "frequency": st.session_state["frequency"],
+                "n_sims": st.session_state["n_sims"],
+                "use_optimized_weights": st.session_state["use_optimized_weights"],
+            },
         }
-    }
-    buffer = BytesIO()
-    pickle.dump(session_data, buffer)
-    b64 = base64.b64encode(buffer.getvalue()).decode()
-    href = f'<a href="data:file/octet-stream;base64,{b64}" download="saa_session.pkl">Download Session File</a>'
-    st.markdown(href, unsafe_allow_html=True)
+        buffer = BytesIO()
+        pickle.dump(session_data, buffer)
+        b64 = base64.b64encode(buffer.getvalue()).decode()
+        href = f'<a href="data:file/octet-stream;base64,{b64}" download="saa_session.pkl">Download Session File</a>'
+        st.markdown(href, unsafe_allow_html=True)
+
+with col_restore:
+    if st.button("↩️ Restore Defaults", key="restore_defaults", help="Load default LTCMA, Correlation, and Scenarios"):
+        try:
+            ltcma_default = pd.read_excel(DEFAULT_LTCMA_PATH, index_col=0)
+            corr_default = pd.read_excel(DEFAULT_CORR_PATH, index_col=0)
+            scenarios_default = pd.read_excel(DEFAULT_SCENARIO_PATH)
+
+            # basic alignment and hygiene
+            # ensure corr rows/cols match LTCMA index
+            corr_default = corr_default.reindex(index=ltcma_default.index, columns=ltcma_default.index)
+            corr_default.fillna(0.0, inplace=True)
+            np.fill_diagonal(corr_default.values, 1.0)
+
+            # write into session and clear derived caches
+            st.session_state["ltcma_df"] = ltcma_default.copy()
+            st.session_state["prev_ltcma"] = ltcma_default.copy()
+
+            st.session_state["corr_matrix"] = corr_default.copy()
+            st.session_state["prev_corr_matrix"] = corr_default.copy()
+
+            # store scenarios for use if no upload provided
+            st.session_state["default_scenarios_df"] = scenarios_default.copy()
+
+            # clear outputs that depend on inputs
+            for k in ["portfolio_paths", "x_axis", "optimized_weights"]:
+                st.session_state.pop(k, None)
+
+            st.success("Defaults restored.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to restore defaults: {e}")
+#v3.1
 
 
 # Defaults
@@ -857,8 +897,6 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
                 mime="image/png",
                 key="download_drawdown_tab"
             )
-
-
 
 
 
