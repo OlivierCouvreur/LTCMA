@@ -77,6 +77,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import sys
+import matplotlib
+matplotlib.use('Agg')  # explicitly set backend
 from matplotlib.ticker import FuncFormatter
 from io import BytesIO
 from scipy.optimize import minimize
@@ -855,6 +857,7 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
                 mime="image/png",
                 key="download_drawdown_tab"
             )
+
 
 
 
