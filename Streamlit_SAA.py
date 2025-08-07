@@ -1,4 +1,4 @@
-"""  V3.1.7
+"""
 Strategic Asset Allocation (SAA) Portfolio Monte Carlo Simulator
 ================================================================
 
@@ -13,7 +13,7 @@ to generate probabilistic projections of portfolio outcomes, evaluate risk metri
 and Conditional VaR (CVaR), and optimize portfolio weights based on risk-return objectives.
 
 Key Features:
--------------
+------------
 - Monte Carlo Simulation with fat-tail distributions (Student-t)
 - Portfolio Optimization (Max Return / Min Volatility)
 - Efficient Frontier Visualization
@@ -156,6 +156,9 @@ n_sims = st.sidebar.slider("Number of Simulations", 100, 5000, st.session_state[
 with st.sidebar.expander("Optional Display Settings"):
     n_paths_to_plot = st.slider("Paths to Display", 0, 50, 0)
     n_extreme_paths = st.slider("Extreme Paths (for Avg)", 0, 10, 0)
+    show_double_initial = st.checkbox("Show Double Initial Value", value=False)
+    show_double_with_inflation = st.checkbox("Show Double with Inflation", value=False)
+    inflation_rate = st.number_input("Inflation Rate (for compounding)", value=0.025, step=0.001, format="%.3f")
 
 with st.sidebar.expander("Value at Risk (VaR) Settings"):
     var_years = st.slider("VaR Horizon (Years)", 1, 10, 1)
@@ -669,6 +672,23 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
             ax.plot(x_axis, np.mean(portfolio_paths[:, best_idx], axis=1), color='green', label='Avg Best')
             ax.plot(x_axis, np.mean(portfolio_paths[:, worst_idx], axis=1), color='red', label='Avg Worst')
 
+        if show_double_initial:
+#            ax.axhline(2 * initial_value, color='red', linestyle='--', linewidth=1, label='2x Initial Value')
+            ax.plot(x_axis, np.full(len(x_axis), 2 * initial_value), color='red', linestyle='--', linewidth=1, label='2x Initial Value')
+
+        # Determine compounding intervals per year based on frequency
+        periods_per_year = {"monthly": 12, "quarterly": 4, "yearly": 1}[frequency]
+
+        # Total number of steps in the simulation
+        n_steps = len(x_axis)
+
+        # Compute compounded inflation-adjusted target: 2x initial, compounded
+        growth_factor = (1 + inflation_rate / periods_per_year) ** np.arange(n_steps)
+        compounded_double = initial_value * 2 * growth_factor
+
+        if show_double_with_inflation:
+            ax.plot(x_axis, compounded_double, color='darkorange', linestyle='--', linewidth=1, label='Inflation-Adj. 2x Target')
+    
         ax.plot(x_axis, median_path, color='blue', label='Median')
         ax.fill_between(x_axis, p05, p95, color='lightblue', alpha=0.3, label='5–95%')
         ax.fill_between(x_axis, p25, p75, color='blue', alpha=0.2, label='25–75%')
@@ -716,6 +736,12 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
         }, index=x_axis)
 
         percentile_df.index.name = "Date"
+        
+        if show_double_initial:
+            percentile_df["2x Initial Value"] = 2 * initial_value
+
+        if show_double_with_inflation:
+            percentile_df["Inflation-Adj. 2x Target"] = compounded_double
 
         # Write to Excel in memory
         excel_buf = BytesIO()
