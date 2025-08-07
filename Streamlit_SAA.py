@@ -1,4 +1,4 @@
-"""
+"""  v3.2.2
 Strategic Asset Allocation (SAA) Portfolio Monte Carlo Simulator
 ================================================================
 
@@ -112,6 +112,16 @@ default_values = {
 for key, val in default_values.items():
     if key not in st.session_state:
         st.session_state[key] = val
+
+if "simulation_has_run" not in st.session_state:
+    st.session_state.simulation_has_run = False
+
+# Additional defensive session state initialization
+if "portfolio_paths" not in st.session_state:
+    st.session_state["portfolio_paths"] = None
+
+if "x_axis" not in st.session_state:
+    st.session_state["x_axis"] = None
 
 # Sidebar Inputs referencing session_state directly
 st.sidebar.header("Simulation Parameters")
@@ -520,6 +530,7 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
 
         st.session_state["portfolio_paths"] = portfolio_paths
         st.session_state["x_axis"] = pd.date_range(start=start_date, periods=n_steps + 1, freq="ME")
+        st.session_state.simulation_has_run = True
 
         st.write("**Weights Used in Simulation:**")
         st.dataframe(pd.DataFrame({"Weight": weights_to_use}, index=ltcma_df.index))
@@ -644,7 +655,11 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
 #######################################################
 
 
-if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
+#if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
+# if st.session_state.simulation_has_run:   #v3.2.1
+#if st.session_state.simulation_has_run and st.session_state["portfolio_paths"] is not None and st.session_state["x_axis"] is not None:
+if st.session_state.get("simulation_has_run") and st.session_state.get("portfolio_paths") is not None and st.session_state.get("x_axis") is not None:
+    
     portfolio_paths = st.session_state["portfolio_paths"]
     x_axis = st.session_state["x_axis"]
 
