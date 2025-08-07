@@ -4,3 +4,4 @@ pandas
 matplotlib>=3.5
 scipy
 openpyxl
+xlsxwriter
