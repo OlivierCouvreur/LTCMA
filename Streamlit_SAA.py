@@ -1,4 +1,4 @@
-"""
+"""  V3.1.7
 Strategic Asset Allocation (SAA) Portfolio Monte Carlo Simulator
 ================================================================
 
@@ -655,9 +655,11 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
         median_path = np.median(portfolio_paths, axis=1)
 
         fig, ax = plt.subplots(figsize=(10, 6))
+
         if n_paths_to_plot > 0:
             for idx in np.random.choice(portfolio_paths.shape[1], n_paths_to_plot, replace=False):
-                ax.plot(x_axis, portfolio_paths[:, idx], alpha=0.05, color='gray')
+                color = np.random.rand(3,)  # random RGB
+                ax.plot(x_axis, portfolio_paths[:, idx], color=color, linewidth=0.5, alpha=0.4)
 
         if n_extreme_paths > 0:
             final_values = portfolio_paths[-1]
@@ -670,6 +672,29 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
         ax.plot(x_axis, median_path, color='blue', label='Median')
         ax.fill_between(x_axis, p05, p95, color='lightblue', alpha=0.3, label='5–95%')
         ax.fill_between(x_axis, p25, p75, color='blue', alpha=0.2, label='25–75%')
+
+
+        # Add labels at the end of percentile lines
+        label_fontsize = 8
+        x_last = x_axis[-1]+ pd.Timedelta(days=15)
+
+        ax.text(x_last, median_path[-1], f"Median: {median_path[-1]:,.0f}", color="blue",
+                fontsize=label_fontsize, va="center", ha="left")
+
+        ax.text(x_last, p25[-1], f"25th: {p25[-1]:,.0f}", color="blue",
+                fontsize=label_fontsize, va="center", ha="left", alpha=0.7)
+
+        ax.text(x_last, p75[-1], f"75th: {p75[-1]:,.0f}", color="blue",
+                fontsize=label_fontsize, va="center", ha="left", alpha=0.7)
+
+        ax.text(x_last, p05[-1], f"5th: {p05[-1]:,.0f}", color="lightblue",
+                fontsize=label_fontsize, va="center", ha="left", alpha=0.9)
+
+        ax.text(x_last, p95[-1], f"95th: {p95[-1]:,.0f}", color="lightblue",
+                fontsize=label_fontsize, va="center", ha="left", alpha=0.9)
+
+
+        
         ax.set_title("Portfolio Value Over Time")
         ax.set_xlabel("Date")
         ax.set_ylabel("Portfolio Value")
@@ -681,7 +706,26 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
         buf = BytesIO()
         fig.savefig(buf, format="png")
 
-        left_button, right_button = st.columns([1, 1])
+
+        percentile_df = pd.DataFrame({
+            "5th Percentile": p05,
+            "25th Percentile": p25,
+            "Median": median_path,
+            "75th Percentile": p75,
+            "95th Percentile": p95
+        }, index=x_axis)
+
+        percentile_df.index.name = "Date"
+
+        # Write to Excel in memory
+        excel_buf = BytesIO()
+        with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
+            percentile_df.to_excel(writer, sheet_name="Percentile Paths")
+
+        excel_buf.seek(0)
+
+
+        left_button, middle_button, right_button = st.columns([1, 1, 1])
 
         with left_button:
             st.download_button(
@@ -689,6 +733,14 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
                 data=buf.getvalue(),
                 file_name="simulation_plot.png",
                 mime="image/png"
+            )
+        with middle_button:
+            st.download_button(
+                label="Download Percentile Paths (Excel)",
+                data=excel_buf,
+                file_name="percentile_paths.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_percentile_paths"
             )
         with right_button:
             st.download_button(
@@ -724,9 +776,9 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
             # Calculate 1st and 99th percentiles to limit x-axis range
             x_min, x_max = np.percentile(final_values, [1, 99])
             # Plot histogram within these bounds
-            ax_hist.hist(final_values, bins=50, range=(0, x_max), color='skyblue', edgecolor='black')
+            ax_hist.hist(final_values, bins=50, range=(0, x_max*1.5), color='skyblue', edgecolor='black')
             # Set explicit x-axis limits
-            ax_hist.set_xlim(0, x_max)
+            ax_hist.set_xlim(0, x_max*1.5)
             
             ax_hist.set_title("Distribution of Final Portfolio Values")
             ax_hist.set_xlabel("Final Value")
@@ -744,12 +796,32 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
 
             # Display & download
             st.pyplot(st.session_state["fig_hist"])
-            st.download_button(
-                label="Download Final Value Distribution Chart", key="download_final_value3",
-                data=st.session_state["buf_hist"],
-                file_name="final_value_distribution.png",
-                mime="image/png"
-            )
+
+            # Export final portfolio values to Excel
+            final_vals_df = pd.DataFrame({"Final Portfolio Value": final_values})
+            excel_buf_final = BytesIO()
+            with pd.ExcelWriter(excel_buf_final, engine="openpyxl") as writer:
+                final_vals_df.to_excel(writer, sheet_name="Final Values", index=False)
+            excel_buf_final.seek(0)
+
+            left_button, right_button = st.columns([1, 1])
+
+            with left_button:
+                st.download_button(
+                    label="Download Final Value Distribution Chart", key="download_final_value3",
+                    data=st.session_state["buf_hist"],
+                    file_name="final_value_distribution.png",
+                    mime="image/png"
+                )
+
+            with right_button:
+                st.download_button(
+                    label="Download Final Values (Excel)",
+                    data=excel_buf_final,
+                    file_name="final_portfolio_values.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_final_values"
+                )
  
     with tab3:
         st.subheader("Value at Risk Statistics")
@@ -793,9 +865,9 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
                 # Compute reasonable axis limits using percentiles
                 x_min, x_max = np.percentile(var_values, [1, 99])
                 # Plot histogram within these bounds
-                ax_var.hist(var_values, bins=50, range=(0, x_max*1.5), color='lightgrey', edgecolor='black')
+                ax_var.hist(var_values, bins=50, range=(x_min/2, x_max*1.5), color='lightgrey', edgecolor='black')
                 # Explicitly set x-axis limits
-                ax_var.set_xlim(0, x_max*1.5)
+                ax_var.set_xlim(x_min/2, x_max*1.5)
 
 
                 ax_var.axvline(var_threshold, color='red', linestyle='--', label=f'{var_confidence}% VaR = {var_threshold:,.2f}')
@@ -813,13 +885,33 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
 
                 # Display and download
                 st.pyplot(fig_var)
-                st.download_button(
-                    label=f"Download {var_confidence}% VaR Distribution Chart",
-                    data=st.session_state["buf_var"],key="download_var2",
-                    file_name="var_distribution.png",
-                    mime="image/png"
-                )
 
+                # Export final period returns for VaR to Excel
+                var_df = pd.DataFrame({"Final Period Return": var_values})
+                excel_buf_var = BytesIO()
+                with pd.ExcelWriter(excel_buf_var, engine="openpyxl") as writer:
+                    var_df.to_excel(writer, sheet_name="VaR Distribution", index=False)
+                excel_buf_var.seek(0)
+
+                left_button, right_button = st.columns([1, 1])
+
+                with left_button:
+                    st.download_button(
+                        label=f"Download {var_confidence}% VaR Distribution Chart",
+                        data=st.session_state["buf_var"],key="download_var2",
+                        file_name="var_distribution.png",
+                        mime="image/png"
+                    )
+                    
+                with right_button:
+                    st.download_button(
+                       label="Download VaR Returns (Excel)",
+                       data=excel_buf_var,
+                       file_name="var_distribution.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       key="download_var_excel"
+                   )
+ 
             
         else:
             st.warning("VaR horizon exceeds simulation length. Increase investment horizon or reduce VaR years.")
@@ -830,31 +922,37 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
         # Drawdown statistics
         max_drawdowns = []
         recovery_times = []
-
+        
         for sim in range(portfolio_paths.shape[1]):
             path = portfolio_paths[:, sim]
-            peak = path[0]
-            trough_idx = 0
-            recovery_time = np.nan
-            max_dd = 0
+
+            peak_val = path[0]
+            peak_idx = 0
+            max_dd = 0.0
+            rec_time_for_max = np.nan  # reset for this simulation
 
             for i in range(1, len(path)):
-                if path[i] > peak:
-                    peak = path[i]
+                # update peak
+                if path[i] > peak_val:
+                    peak_val = path[i]
+                    peak_idx = i
 
-                dd = 1 - path[i] / peak
+                # current drawdown from the most recent peak
+                dd = 1.0 - path[i] / peak_val
+
+                # found a deeper max drawdown → reset recovery to NaN and search ahead
                 if dd > max_dd:
                     max_dd = dd
-                    peak_idx = np.argmax(path[:i+1])  # Index of peak up to now
-                    trough_idx = i
-                    # Look forward for recovery
-                    for j in range(trough_idx + 1, len(path)):
-                        if path[j] >= path[peak_idx]:
-                            recovery_time = j - peak_idx
+                    rec_time_for_max = np.nan  # IMPORTANT: reset so we don’t carry over a prior recovery
+
+                    # look forward for recovery to that peak before end of series
+                    for j in range(i + 1, len(path)):
+                        if path[j] >= peak_val:
+                            rec_time_for_max = j - peak_idx
                             break
 
             max_drawdowns.append(max_dd)
-            recovery_times.append(recovery_time)
+            recovery_times.append(rec_time_for_max)
 
         left_col_dd, right_col_dd = st.columns([1, 2])
 
@@ -867,8 +965,20 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
             st.markdown(f"**75th Percentile Max Drawdown:** {np.percentile(max_drawdowns, 75):.2%}")
             st.markdown(f"**95th Percentile Max Drawdown:** {np.percentile(max_drawdowns, 95):.2%}")
 
+            # recovery time stats only for simulations that actually recovered
+            rec_array = np.array(recovery_times, dtype=float)
+            recovered_mask = ~np.isnan(rec_array)
+            recovered_share = 100.0 * recovered_mask.mean()
+
             freq_label = {"monthly": "months", "quarterly": "quarters", "yearly": "years"}[frequency]
-            st.markdown(f"**Average Recovery Time ({freq_label}):** {np.nanmean(recovery_times):.1f}")
+            if recovered_mask.any():
+                st.markdown(f"**Average Recovery Time ({freq_label}, recovered only):** {np.nanmean(rec_array):.1f}")
+#               st.markdown(f"**Median Recovery Time ({freq_label}, recovered only):** {np.nanmedian(rec_array):.1f}")
+            else:
+                st.markdown(f"**Average Recovery Time ({freq_label}, recovered only):** n/a")
+
+            st.markdown(f"**Recovered Paths:** {recovered_share:.1f}% "
+                        f"({recovered_mask.sum()} of {len(rec_array)})")
 
         with right_col_dd:
             # Plot distribution of Max Drawdowns
@@ -890,14 +1000,39 @@ if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
             # Display and download
 
             st.pyplot(st.session_state["fig_ddist"])
-            st.download_button(
-                label="Download Max Drawdown Distribution Chart",
-                data=st.session_state["buf_ddist"],
-                file_name="max_drawdown_distribution.png",
-                mime="image/png",
-                key="download_drawdown_tab"
-            )
 
+            # Export drawdown and recovery time data
+            drawdown_df = pd.DataFrame({
+                "Max Drawdown": max_drawdowns,
+                "Recovery Time": recovery_times
+            })
+
+            excel_buf_dd = BytesIO()
+            with pd.ExcelWriter(excel_buf_dd, engine="openpyxl") as writer:
+                drawdown_df.to_excel(writer, sheet_name="Drawdowns", index=False)
+
+            excel_buf_dd.seek(0)
+
+            left_button, right_button = st.columns([1, 1])
+
+            with left_button:
+                st.download_button(
+                    label="Download Max Drawdown Distribution Chart",
+                    data=st.session_state["buf_ddist"],
+                    file_name="max_drawdown_distribution.png",
+                    mime="image/png",
+                    key="download_drawdown_tab"
+                )
+                
+            with right_button:
+                st.download_button(
+                    label="Download Drawdown Data (Excel)",
+                    data=excel_buf_dd,
+                    file_name="drawdown_data.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_drawdown_excel"
+                )
+            
 
 
 
