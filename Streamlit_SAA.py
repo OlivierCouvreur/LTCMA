@@ -1,4 +1,4 @@
-"""  v3.2.2
+"""
 Strategic Asset Allocation (SAA) Portfolio Monte Carlo Simulator
 ================================================================
 
@@ -86,7 +86,16 @@ from scipy.stats import t
 from pathlib import Path  # For safer file suffix handling
 import pickle
 import base64
+import hashlib
 
+
+APP_VERSION = "v4.4.4"
+
+
+# Helper to detect DataFrame changes
+def df_hash(df: pd.DataFrame) -> int:
+    """Return an integer hash for a DataFrame."""
+    return int(pd.util.hash_pandas_object(df, index=True).sum())
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -106,7 +115,7 @@ default_values = {
     "initial_value": 200.0,
     "frequency": "monthly",
     "n_sims": 2000,
-    "use_optimized_weights": False  # ← add this line
+    "use_optimized_weights": False
 }
 
 for key, val in default_values.items():
@@ -122,6 +131,14 @@ if "portfolio_paths" not in st.session_state:
 
 if "x_axis" not in st.session_state:
     st.session_state["x_axis"] = None
+
+# v4.3 ----------
+st.session_state.simulation_has_run = (
+    st.session_state["portfolio_paths"] is not None
+    and st.session_state["x_axis"] is not None
+)
+# v4.3 ----------
+
 
 # Sidebar Inputs referencing session_state directly
 st.sidebar.header("Simulation Parameters")
@@ -214,6 +231,24 @@ with st.sidebar.expander("Historical Scenario Analysis"):
             scenario_names = scenarios_df.iloc[:, 0].astype(str).tolist()
             selected_scenario = st.selectbox("Select Scenario", scenario_names)
 
+st.sidebar.markdown(
+    f"""
+    <style>
+      .app-version-badge {{
+        position: fixed;
+        bottom: 10px;
+        left: 12px;
+        right: 12px;
+        font-size: 0.8rem;
+        color: #6b7280; /* muted grey */
+        opacity: 0.9;
+      }}
+    </style>
+    <div class="app-version-badge">Version {APP_VERSION}</div>
+    """,
+    unsafe_allow_html=True,
+)
+
 # v3.1  Save / Restore controls
 col_save, col_restore , col_dummy = st.columns([1, 1, 2])
 
@@ -253,11 +288,13 @@ with col_restore:
 
             # write into session and clear derived caches
             st.session_state["ltcma_df"] = ltcma_default.copy()
-            st.session_state["prev_ltcma"] = ltcma_default.copy()
-
+            # st.session_state["prev_ltcma"] = ltcma_default.copy()     #v4.3
+            st.session_state["ltcma_hash"] = df_hash(ltcma_default)     #v4.3
+            
             st.session_state["corr_matrix"] = corr_default.copy()
-            st.session_state["prev_corr_matrix"] = corr_default.copy()
-
+            #st.session_state["prev_corr_matrix"] = corr_default.copy() #v4.3
+            st.session_state["corr_hash"] = df_hash(corr_default)       #v4.3
+            
             # store scenarios for use if no upload provided
             st.session_state["default_scenarios_df"] = scenarios_default.copy()
 
@@ -298,7 +335,9 @@ if uploaded_ltcma is not None:
                 ltcma_df[col] = ltcma_df[col].astype(float)
         
         st.session_state["ltcma_df"] = ltcma_df.copy()
-        st.session_state["prev_ltcma"] = ltcma_df.copy()
+        #st.session_state["prev_ltcma"] = ltcma_df.copy()       #v4.3
+        st.session_state["ltcma_hash"] = df_hash(ltcma_df)      #v4.3
+                
         st.session_state.pop("portfolio_paths", None)
         st.session_state.pop("x_axis", None)
     except Exception as e:
@@ -307,7 +346,8 @@ if uploaded_ltcma is not None:
 ltcma_df = st.session_state.get("ltcma_df", DEFAULT_LTCMA.copy())
 asset_names = ltcma_df.index.tolist()
 ltcma_df = st.data_editor(ltcma_df, num_rows="dynamic", use_container_width=True, key="ltcma_editor")
-# Re-enforce float types after user editing
+
+# Enforce float types after user editing
 for col in ["Min", "Max"]:
     if col in ltcma_df.columns:
         ltcma_df[col] = ltcma_df[col].astype(float)
@@ -328,12 +368,17 @@ def sync_corr_with_ltcma(ltcma_df, corr_matrix=None):
 corr_matrix = sync_corr_with_ltcma(ltcma_df, st.session_state.get("corr_matrix"))
 st.session_state["corr_matrix"] = corr_matrix
 
-prev_ltcma = st.session_state.get("prev_ltcma")
-if prev_ltcma is not None and not ltcma_df.equals(prev_ltcma):
+
+# v4.3  --------------------------
+prev_ltcma_hash = st.session_state.get("ltcma_hash")
+current_ltcma_hash = df_hash(ltcma_df)
+if prev_ltcma_hash is not None and current_ltcma_hash != prev_ltcma_hash:
     st.session_state.pop("portfolio_paths", None)
     st.session_state.pop("x_axis", None)
-st.session_state["prev_ltcma"] = ltcma_df.copy()
+st.session_state["ltcma_hash"] = current_ltcma_hash
 st.session_state["ltcma_df"] = ltcma_df.copy()
+# v4.3  --------------------------
+
 
 # Correlation Section
 corr_col1, corr_col2 ,corr_col3 = st.columns([1, 1, 1])
@@ -349,7 +394,9 @@ if uploaded_corr is not None:
     try:
         corr_matrix = pd.read_excel(uploaded_corr, index_col=0)
         st.session_state["corr_matrix"] = corr_matrix.copy()
-        st.session_state["prev_corr_matrix"] = corr_matrix.copy()
+        # st.session_state["prev_corr_matrix"] = corr_matrix.copy()     #v4.3
+        st.session_state["corr_hash"] = df_hash(corr_matrix)            #v4.3
+        
         st.session_state.pop("portfolio_paths", None)
         st.session_state.pop("x_axis", None)
     except Exception as e:
@@ -373,17 +420,23 @@ corr_matrix = st.data_editor(
     key="corr_editor"
 )
 
-prev_corr = st.session_state.get("prev_corr_matrix")
-if prev_corr is not None and not corr_matrix.equals(prev_corr):
+
+# v4.3 -----------------
+prev_corr_hash = st.session_state.get("corr_hash")
+current_corr_hash = df_hash(corr_matrix)
+if prev_corr_hash is not None and current_corr_hash != prev_corr_hash:
     st.session_state.pop("portfolio_paths", None)
     st.session_state.pop("x_axis", None)
-st.session_state["prev_corr_matrix"] = corr_matrix.copy()
+st.session_state["corr_hash"] = current_corr_hash
 st.session_state["corr_matrix"] = corr_matrix.copy()
+# v4.3 -----------------
+
 
 if apply_symmetry:
     sym_corr = (corr_matrix + corr_matrix.T) / 2.0
     np.fill_diagonal(sym_corr.values, 1.0)
     st.session_state["corr_matrix"] = sym_corr
+    st.session_state["corr_hash"] = df_hash(sym_corr)  # v4.3
     st.session_state.pop("portfolio_paths", None)
     st.session_state.pop("x_axis", None)
     st.rerun()
@@ -498,23 +551,53 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
         ef_buf.seek(0)
         st.download_button("Download Efficient Frontier Chart", data=ef_buf, file_name="efficient_frontier.png", mime="image/png")
 
+  
     # Simulate
     if run_sim:
-        weights_to_use = st.session_state.get("optimized_weights") if use_optimized_weights and "optimized_weights" in st.session_state else ltcma_df["SAA"].values
 
-        # Recalculate expected return and volatility with actual weights used
+        # --- Fixed seed for reproducible simulations ---
+        # Change this number to any non-negative integer to get a different but still reproducible run.
+        # Acceptable values: any Python int >= 0 (e.g., 0, 1, 42, 20250826).
+        SIMULATION_SEED = 20250826
+        sim_rng = np.random.default_rng(SIMULATION_SEED)
+        # -----------------------------------------------
+
+
+        # choose weights for the sim
+        weights_to_use = (
+            st.session_state.get("optimized_weights").reindex(ltcma_df.index).fillna(0).values
+            if use_optimized_weights and "optimized_weights" in st.session_state
+            else ltcma_df["SAA"].values
+        )
+
+        # pull inputs
+        mu = ltcma_df["Exp Return"].values
+        vols = ltcma_df["Exp Volatility"].values
+
+        # user correlation, aligned to LTCMA assets
+        corr = corr_matrix.loc[ltcma_df.index, ltcma_df.index].values
+        cov = np.outer(vols, vols) * corr
+
+        # expected stats for the summary tab, tied to the exact weights/cov used
         expected_portfolio_return = np.dot(weights_to_use, mu)
         expected_portfolio_volatility = np.sqrt(weights_to_use.T @ cov @ weights_to_use)
 
-        mu = ltcma_df["Exp Return"].values
-        vols = ltcma_df["Exp Volatility"].values
-        corr = np.identity(len(weights_to_use))
-        cov = np.outer(vols, vols) * corr
         steps_per_year = {"monthly": 12, "quarterly": 4, "yearly": 1}[frequency]
         n_steps = n_years * steps_per_year
         dt = 1 / steps_per_year
 
-        chol = np.linalg.cholesky(cov)
+        # robust Cholesky for nearly PSD covariances
+        try:
+            chol = np.linalg.cholesky(cov)
+        except np.linalg.LinAlgError:
+            eigvals, eigvecs = np.linalg.eigh(cov)
+            eigvals[eigvals < 0] = 0.0
+            cov = eigvecs @ np.diag(eigvals) @ eigvecs.T + 1e-12 * np.eye(cov.shape[0])
+            chol = np.linalg.cholesky(cov)
+
+        # Student-t scaling so shocks have unit variance pre-correlation
+        scale = np.sqrt(fat_tail_df / (fat_tail_df - 2))  # df > 2
+
         portfolio_paths = np.zeros((n_steps + 1, n_sims))
         portfolio_paths[0] = initial_value
 
@@ -522,29 +605,23 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
             prices = np.ones(len(weights_to_use))
             path = [initial_value]
             for _ in range(n_steps):
-                z = t.rvs(fat_tail_df, size=len(weights_to_use))
+                z = t.rvs(fat_tail_df, size=len(weights_to_use), random_state=sim_rng) / scale  # v4.0.2 : use a fixed seed for random generator
                 correlated_z = chol @ z
                 prices *= np.exp(mu * dt + correlated_z * np.sqrt(dt))
                 path.append(np.dot(prices, weights_to_use) * initial_value)
             portfolio_paths[:, sim] = path
 
         st.session_state["portfolio_paths"] = portfolio_paths
-        st.session_state["x_axis"] = pd.date_range(start=start_date, periods=n_steps + 1, freq="ME")
+
+        # make the x-axis frequency match the chosen sim frequency
+        freq_map = {"monthly": "ME", "quarterly": "QE", "yearly": "YE"}
+        st.session_state["x_axis"] = pd.date_range(start=start_date, periods=n_steps + 1, freq=freq_map[frequency])
+
         st.session_state.simulation_has_run = True
 
-        st.write("**Weights Used in Simulation:**")
+        st.write("Weights used in simulation:")
         st.dataframe(pd.DataFrame({"Weight": weights_to_use}, index=ltcma_df.index))
 
-
-        final_values = portfolio_paths[-1]
-        steps_for_var = int(var_years * steps_per_year)
-        if steps_for_var > n_steps:
-            st.warning("VaR horizon exceeds simulation length. Increase investment horizon or reduce VaR years.")
-            var_values = final_values
-        else:
-            var_values = portfolio_paths[steps_for_var]
-
- 
 
     # Optimize
     if run_opt:
@@ -658,14 +735,32 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
 #if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
 # if st.session_state.simulation_has_run:   #v3.2.1
 #if st.session_state.simulation_has_run and st.session_state["portfolio_paths"] is not None and st.session_state["x_axis"] is not None:
-if st.session_state.get("simulation_has_run") and st.session_state.get("portfolio_paths") is not None and st.session_state.get("x_axis") is not None:
-    
-    portfolio_paths = st.session_state["portfolio_paths"]
-    x_axis = st.session_state["x_axis"]
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Simulation Chart", "Summary Statistics", "Value at Risk", "Drawdown Analysis"])
+# if st.session_state.get("simulation_has_run") and st.session_state.get("portfolio_paths") is not None and st.session_state.get("x_axis") is not None:   #v4.3
 
-    with tab1:
+
+
+#v4.4 ------------------------------
+tab1, tab2, tab3, tab4 = st.tabs(["Simulation Chart", "Summary Statistics", "Value at Risk", "Drawdown Analysis"])
+
+# small helper: do we have data to render?
+has_data = (
+    st.session_state.get("simulation_has_run")
+    and isinstance(st.session_state.get("portfolio_paths"), np.ndarray)
+    and st.session_state.get("x_axis") is not None
+)
+
+#v4.4 ------------------------------
+
+
+
+with tab1:
+    if not has_data:
+        st.info("Run a simulation to see the chart.")
+    else:
+        portfolio_paths = st.session_state["portfolio_paths"]
+        x_axis = st.session_state["x_axis"]
+
         p25 = np.percentile(portfolio_paths, 25, axis=1)
         p75 = np.percentile(portfolio_paths, 75, axis=1)
         p05 = np.percentile(portfolio_paths, 5, axis=1)
@@ -736,6 +831,9 @@ if st.session_state.get("simulation_has_run") and st.session_state.get("portfoli
         ax.legend()
         ax.grid(True)
         plt.xticks(rotation=45)
+
+        #ax.set_ylim(0, 20000)    # Forces th Y axis: Sets min=0, max=5000, # to delete later when no longer needed
+        
         st.pyplot(fig)
 
         buf = BytesIO()
@@ -791,7 +889,14 @@ if st.session_state.get("simulation_has_run") and st.session_state.get("portfoli
                 mime='text/csv'
             )
 
-    with tab2:
+
+with tab2:
+    if not has_data:
+        st.info("Run a simulation to see summary statistics.")
+    else:
+        portfolio_paths = st.session_state["portfolio_paths"]
+        x_axis = st.session_state["x_axis"]
+        
         st.subheader("Summary Statistics")
 
         left_col_final, right_col_final = st.columns([1, 2])
@@ -864,7 +969,14 @@ if st.session_state.get("simulation_has_run") and st.session_state.get("portfoli
                     key="download_final_values"
                 )
  
-    with tab3:
+
+with tab3:
+    if not has_data:
+        st.info("Run a simulation to see VaR.")
+    else:
+        portfolio_paths = st.session_state["portfolio_paths"]
+        x_axis = st.session_state["x_axis"]
+
         st.subheader("Value at Risk Statistics")
         if var_years * steps_per_year <= n_steps:
             steps_for_var = int(var_years * steps_per_year)
@@ -957,7 +1069,13 @@ if st.session_state.get("simulation_has_run") and st.session_state.get("portfoli
         else:
             st.warning("VaR horizon exceeds simulation length. Increase investment horizon or reduce VaR years.")
 
-    with tab4:
+with tab4:
+    if not has_data:
+        st.info("Run a simulation to see drawdown analysis.")
+    else:
+        portfolio_paths = st.session_state["portfolio_paths"]
+        x_axis = st.session_state["x_axis"]
+
         st.subheader("Drawdown Statistics")
 
         # Drawdown statistics
@@ -1075,6 +1193,7 @@ if st.session_state.get("simulation_has_run") and st.session_state.get("portfoli
                 )
             
 
-
+# else:
+#    st.info("Please run a simulation to view results.")
 
 
