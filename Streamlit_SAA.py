@@ -89,7 +89,7 @@ import base64
 import hashlib
 
 
-APP_VERSION = "v4.4.4"
+APP_VERSION = "v4.5.0"
 
 
 # Helper to detect DataFrame changes
@@ -326,22 +326,33 @@ with ltcma_col1:
 with ltcma_col2:
     uploaded_ltcma = st.file_uploader("Upload LTCMA File", type=["xls", "xlsx"], key="ltcma_upload", label_visibility="collapsed")
 
+
 if uploaded_ltcma is not None:
-    try:
-        ltcma_df = pd.read_excel(uploaded_ltcma, index_col=0)
-        # Enforce Min/Max columns to be float
-        for col in ["Min", "Max"]:
-            if col in ltcma_df.columns:
-                ltcma_df[col] = ltcma_df[col].astype(float)
-        
-        st.session_state["ltcma_df"] = ltcma_df.copy()
-        #st.session_state["prev_ltcma"] = ltcma_df.copy()       #v4.3
-        st.session_state["ltcma_hash"] = df_hash(ltcma_df)      #v4.3
-                
-        st.session_state.pop("portfolio_paths", None)
-        st.session_state.pop("x_axis", None)
-    except Exception as e:
-        st.error(f"Failed to read LTCMA file: {e}")
+    # compute a content digest to detect changes
+    ltcma_digest = hashlib.sha1(uploaded_ltcma.getvalue()).hexdigest()
+    prev_digest = st.session_state.get("ltcma_upload_digest")
+
+    if ltcma_digest != prev_digest:
+        try:
+            uploaded_ltcma.seek(0)  # make sure the buffer is at start
+            ltcma_df = pd.read_excel(uploaded_ltcma, index_col=0)
+            for col in ["Min", "Max"]:
+                if col in ltcma_df.columns:
+                    ltcma_df[col] = ltcma_df[col].astype(float)
+
+            st.session_state["ltcma_df"] = ltcma_df.copy()
+            st.session_state["ltcma_hash"] = df_hash(ltcma_df)
+            st.session_state["ltcma_upload_digest"] = ltcma_digest
+
+            # clear derived artifacts only because the data actually changed
+            for k in ["portfolio_paths", "x_axis", "optimized_weights"]:
+                st.session_state.pop(k, None)
+
+            st.success("LTCMA file loaded.")
+            st.rerun()  # safe: next run sees same digest and will not re-enter
+        except Exception as e:
+            st.error(f"Failed to read LTCMA file: {e}")
+    # else: same file as before → do nothing, no rerun
 
 ltcma_df = st.session_state.get("ltcma_df", DEFAULT_LTCMA.copy())
 asset_names = ltcma_df.index.tolist()
@@ -391,16 +402,25 @@ with corr_col2:
 
 
 if uploaded_corr is not None:
-    try:
-        corr_matrix = pd.read_excel(uploaded_corr, index_col=0)
-        st.session_state["corr_matrix"] = corr_matrix.copy()
-        # st.session_state["prev_corr_matrix"] = corr_matrix.copy()     #v4.3
-        st.session_state["corr_hash"] = df_hash(corr_matrix)            #v4.3
-        
-        st.session_state.pop("portfolio_paths", None)
-        st.session_state.pop("x_axis", None)
-    except Exception as e:
-        st.error(f"Failed to read correlation matrix: {e}")
+    corr_digest = hashlib.sha1(uploaded_corr.getvalue()).hexdigest()
+    prev_corr_digest = st.session_state.get("corr_upload_digest")
+
+    if corr_digest != prev_corr_digest:
+        try:
+            uploaded_corr.seek(0)
+            corr_matrix = pd.read_excel(uploaded_corr, index_col=0)
+            st.session_state["corr_matrix"] = corr_matrix.copy()
+            st.session_state["corr_hash"] = df_hash(corr_matrix)
+            st.session_state["corr_upload_digest"] = corr_digest
+
+            for k in ["portfolio_paths", "x_axis"]:
+                st.session_state.pop(k, None)
+
+            st.success("Correlation file loaded.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to read correlation matrix: {e}")
+    # else: same file → do nothing
 
 existing_corr = st.session_state.get("corr_matrix")
 
