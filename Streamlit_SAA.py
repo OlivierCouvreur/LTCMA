@@ -89,7 +89,7 @@ import base64
 import hashlib
 
 
-APP_VERSION = "v4.5.0"
+APP_VERSION = "v4.9.0"
 
 
 # Helper to detect DataFrame changes
@@ -149,9 +149,19 @@ with st.sidebar.expander("Session Management"):
         try:
             session_data = pickle.load(uploaded_session)
 
-            # Restore tables
-            st.session_state["ltcma_df"] = session_data["ltcma_df"]
-            st.session_state["corr_matrix"] = session_data["corr_matrix"]
+            # Restore tables into stores (not widget keys)
+            st.session_state["ltcma_base_default"] = session_data["ltcma_df"].copy()
+            st.session_state["corr_store"] = session_data["corr_matrix"].copy()
+            st.session_state["corr_assets"] = tuple(session_data["ltcma_df"].index.tolist())
+
+            # force editors to rebuild using the restored data
+            st.session_state.pop("ltcma_widget", None)
+            st.session_state.pop("corr_widget", None)
+
+            # clear derived outputs
+            for k in ["portfolio_paths", "x_axis", "optimized_weights", "prev_ltcma_df", "prev_corr_df"]:
+                st.session_state.pop(k, None)
+
 
             # Restore parameters explicitly
             sim_params = session_data.get("sim_params", {})
@@ -255,8 +265,10 @@ col_save, col_restore , col_dummy = st.columns([1, 1, 2])
 with col_save:
     if st.button("💾 Save Session", key="save_session_main"):
         session_data = {
-            "ltcma_df": st.session_state["ltcma_df"],
-            "corr_matrix": st.session_state["corr_matrix"],
+            # save the cleaned, current table you already computed for calculations
+            "ltcma_df": ltcma_df.copy(),
+            # save the correlation from the store (fallback to current matrix if needed)
+            "corr_matrix": ensure_corr_shape(ltcma_df.index, st.session_state.get("corr_store")).copy(),
             "optimized_weights": st.session_state.get("optimized_weights", None),
             "sim_params": {
                 "start_date": st.session_state["start_date"],
@@ -287,29 +299,33 @@ with col_restore:
             np.fill_diagonal(corr_default.values, 1.0)
 
             # write into session and clear derived caches
-            st.session_state["ltcma_df"] = ltcma_default.copy()
-            # st.session_state["prev_ltcma"] = ltcma_default.copy()     #v4.3
-            st.session_state["ltcma_hash"] = df_hash(ltcma_default)     #v4.3
-            
-            st.session_state["corr_matrix"] = corr_default.copy()
-            #st.session_state["prev_corr_matrix"] = corr_default.copy() #v4.3
-            st.session_state["corr_hash"] = df_hash(corr_default)       #v4.3
-            
-            # store scenarios for use if no upload provided
+             # put defaults into stores (not widget keys)
+            st.session_state["ltcma_base_default"] = ltcma_default.copy()
+            st.session_state["corr_store"] = corr_default.copy()
+            st.session_state["corr_assets"] = tuple(ltcma_default.index.tolist())
             st.session_state["default_scenarios_df"] = scenarios_default.copy()
 
-            # clear outputs that depend on inputs
-            for k in ["portfolio_paths", "x_axis", "optimized_weights"]:
+            # force both editors to rebuild with defaults
+            st.session_state.pop("ltcma_widget", None)
+            st.session_state.pop("corr_widget", None)
+
+            # clear derived outputs and previous-change caches
+            for k in ["portfolio_paths", "x_axis", "optimized_weights", "prev_ltcma_df", "prev_corr_df"]:
                 st.session_state.pop(k, None)
 
             st.success("Defaults restored.")
             st.rerun()
+
+
+
+
+            
         except Exception as e:
             st.error(f"Failed to restore defaults: {e}")
 #v3.1
 
+# --- LTCMA (live editor, no Apply) ---
 
-# Defaults
 DEFAULT_LTCMA = pd.DataFrame({
     "Exp Return": [0.06, 0.03, 0.08],
     "Exp Volatility": [0.10, 0.05, 0.15],
@@ -318,152 +334,145 @@ DEFAULT_LTCMA = pd.DataFrame({
     "Max": [1.0, 1.0, 1.0]
 }, index=["Equities", "Bonds", "Alternatives"])
 
-# LTCMA Section
+st.subheader("LTCMA Table")
+uploaded_ltcma = st.file_uploader("Upload LTCMA File", type=["xls", "xlsx"], key="ltcma_upload", label_visibility="collapsed")
 
-ltcma_col1, ltcma_col2 = st.columns([2, 1])
-with ltcma_col1:
-    st.subheader("LTCMA Table")
-with ltcma_col2:
-    uploaded_ltcma = st.file_uploader("Upload LTCMA File", type=["xls", "xlsx"], key="ltcma_upload", label_visibility="collapsed")
-
-
+# Base table to show in the widget
 if uploaded_ltcma is not None:
-    # compute a content digest to detect changes
-    ltcma_digest = hashlib.sha1(uploaded_ltcma.getvalue()).hexdigest()
-    prev_digest = st.session_state.get("ltcma_upload_digest")
+    base_ltcma = pd.read_excel(uploaded_ltcma, index_col=0)
+    # reset the widget state so the upload actually shows up
+    st.session_state.pop("ltcma_widget", None)
+else:
+    # if the widget already has state, it will ignore this base
+    base_ltcma = st.session_state.get("ltcma_base_default", DEFAULT_LTCMA)
 
-    if ltcma_digest != prev_digest:
-        try:
-            uploaded_ltcma.seek(0)  # make sure the buffer is at start
-            ltcma_df = pd.read_excel(uploaded_ltcma, index_col=0)
-            for col in ["Min", "Max"]:
-                if col in ltcma_df.columns:
-                    ltcma_df[col] = ltcma_df[col].astype(float)
-
-            st.session_state["ltcma_df"] = ltcma_df.copy()
-            st.session_state["ltcma_hash"] = df_hash(ltcma_df)
-            st.session_state["ltcma_upload_digest"] = ltcma_digest
-
-            # clear derived artifacts only because the data actually changed
-            for k in ["portfolio_paths", "x_axis", "optimized_weights"]:
-                st.session_state.pop(k, None)
-
-            st.success("LTCMA file loaded.")
-            st.rerun()  # safe: next run sees same digest and will not re-enter
-        except Exception as e:
-            st.error(f"Failed to read LTCMA file: {e}")
-    # else: same file as before → do nothing, no rerun
-
-ltcma_df = st.session_state.get("ltcma_df", DEFAULT_LTCMA.copy())
-asset_names = ltcma_df.index.tolist()
-ltcma_df = st.data_editor(ltcma_df, num_rows="dynamic", use_container_width=True, key="ltcma_editor")
-
-# Enforce float types after user editing
-for col in ["Min", "Max"]:
-    if col in ltcma_df.columns:
-        ltcma_df[col] = ltcma_df[col].astype(float)
-
-# Synchronize Correlation Matrix with LTCMA
-def sync_corr_with_ltcma(ltcma_df, corr_matrix=None):
-    assets = ltcma_df.index
-
-    if corr_matrix is None or corr_matrix.empty:
-        corr_matrix = pd.DataFrame(np.eye(len(assets)), index=assets, columns=assets)
-    else:
-        corr_matrix = corr_matrix.reindex(index=assets, columns=assets)
-        corr_matrix.fillna(0.0, inplace=True)
-        np.fill_diagonal(corr_matrix.values, 1.0)
-
-    return corr_matrix
-
-corr_matrix = sync_corr_with_ltcma(ltcma_df, st.session_state.get("corr_matrix"))
-st.session_state["corr_matrix"] = corr_matrix
-
-
-# v4.3  --------------------------
-prev_ltcma_hash = st.session_state.get("ltcma_hash")
-current_ltcma_hash = df_hash(ltcma_df)
-if prev_ltcma_hash is not None and current_ltcma_hash != prev_ltcma_hash:
-    st.session_state.pop("portfolio_paths", None)
-    st.session_state.pop("x_axis", None)
-st.session_state["ltcma_hash"] = current_ltcma_hash
-st.session_state["ltcma_df"] = ltcma_df.copy()
-# v4.3  --------------------------
-
-
-# Correlation Section
-corr_col1, corr_col2 ,corr_col3 = st.columns([1, 1, 1])
-with corr_col1:
-    st.subheader("Correlation Matrix")
-with corr_col3:
-    uploaded_corr = st.file_uploader("Upload Corr Matrix", type=["xls", "xlsx"], key="corr_upload", label_visibility="collapsed")
-with corr_col2:
-    apply_symmetry = st.button("↔", help="Apply Symmetry")
-
-
-if uploaded_corr is not None:
-    corr_digest = hashlib.sha1(uploaded_corr.getvalue()).hexdigest()
-    prev_corr_digest = st.session_state.get("corr_upload_digest")
-
-    if corr_digest != prev_corr_digest:
-        try:
-            uploaded_corr.seek(0)
-            corr_matrix = pd.read_excel(uploaded_corr, index_col=0)
-            st.session_state["corr_matrix"] = corr_matrix.copy()
-            st.session_state["corr_hash"] = df_hash(corr_matrix)
-            st.session_state["corr_upload_digest"] = corr_digest
-
-            for k in ["portfolio_paths", "x_axis"]:
-                st.session_state.pop(k, None)
-
-            st.success("Correlation file loaded.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Failed to read correlation matrix: {e}")
-    # else: same file → do nothing
-
-existing_corr = st.session_state.get("corr_matrix")
-
-corr_matrix = sync_corr_with_ltcma(ltcma_df, st.session_state.get("corr_matrix"))
-st.session_state["corr_matrix"] = corr_matrix
-
-float_config = {
-    col: st.column_config.NumberColumn(
-        label=col, min_value=-1.0, max_value=1.0, step=0.01, format="%.2f"
-    ) for col in corr_matrix.columns
-}
-corr_matrix = st.data_editor(
-    corr_matrix,
+# Render the editor. IMPORTANT: use the return value; do NOT read st.session_state["ltcma_widget"].
+ltcma_return = st.data_editor(
+    base_ltcma,
+    num_rows="dynamic",
     use_container_width=True,
-    disabled=False,
-    column_config=float_config,
-    key="corr_editor"
+    key="ltcma_widget"
 )
 
+# Light hygiene on a copy for calculations ONLY (don’t write back to widget)
+ltcma_df = ltcma_return.copy()
+for c in ["Exp Return", "Exp Volatility", "SAA", "Min", "Max"]:
+    if c in ltcma_df.columns:
+        ltcma_df[c] = pd.to_numeric(ltcma_df[c], errors="coerce")
 
-# v4.3 -----------------
-prev_corr_hash = st.session_state.get("corr_hash")
-current_corr_hash = df_hash(corr_matrix)
-if prev_corr_hash is not None and current_corr_hash != prev_corr_hash:
+ltcma_df = ltcma_df.dropna(how="all")
+ltcma_df.index = ltcma_df.index.astype(str).str.strip()
+ltcma_df = ltcma_df.loc[ltcma_df.index != ""]
+
+# Change detection (no hashes). If table changed -> clear derived outputs
+prev_ltcma = st.session_state.get("prev_ltcma_df")
+if prev_ltcma is None or not ltcma_df.equals(prev_ltcma):
+    st.session_state["prev_ltcma_df"] = ltcma_df.copy()
     st.session_state.pop("portfolio_paths", None)
     st.session_state.pop("x_axis", None)
-st.session_state["corr_hash"] = current_corr_hash
-st.session_state["corr_matrix"] = corr_matrix.copy()
-# v4.3 -----------------
 
 
-if apply_symmetry:
-    sym_corr = (corr_matrix + corr_matrix.T) / 2.0
-    np.fill_diagonal(sym_corr.values, 1.0)
-    st.session_state["corr_matrix"] = sym_corr
-    st.session_state["corr_hash"] = df_hash(sym_corr)  # v4.3
+
+def ensure_corr_shape(assets: pd.Index, corr_df: pd.DataFrame | None) -> pd.DataFrame:
+    if corr_df is None or getattr(corr_df, "empty", True):
+        return pd.DataFrame(np.eye(len(assets)), index=assets, columns=assets)
+    out = corr_df.reindex(index=assets, columns=assets)
+    out = out.fillna(0.0)
+    np.fill_diagonal(out.values, 1.0)
+    return out
+
+
+
+# --- keep corr editor in lockstep with LTCMA assets ---
+new_assets = tuple(ltcma_df.index.tolist())
+prev_assets = st.session_state.get("corr_assets")
+
+if prev_assets is None or prev_assets != new_assets:
+    # realign stored corr to the new asset set and reset the editor widget
+    st.session_state["corr_store"] = ensure_corr_shape(ltcma_df.index, st.session_state.get("corr_store"))
+    st.session_state["corr_assets"] = new_assets
+    st.session_state.pop("corr_widget", None)  # forces the editor to rebuild with new rows/cols
+
+
+
+
+
+
+# --- Correlation Matrix (live editor, auto-align to LTCMA) ---
+
+# Header + Symmetrize button on the right
+hcol, bcol = st.columns([6, 1])
+with hcol:
+    st.subheader("Correlation Matrix")
+with bcol:
+    symm_click = st.button(
+        "↔ Symmetrize",
+        key="symmetrize_btn",
+        help="Set to (A + Aᵀ)/2, clip to [-1,1], diagonal=1"
+    )
+
+uploaded_corr = st.file_uploader(
+    "Upload Corr Matrix", type=["xls", "xlsx"], key="corr_upload", label_visibility="collapsed"
+)
+
+# Keep a separate store for corr (NOT the widget key)
+corr_store: pd.DataFrame | None = st.session_state.get("corr_store")
+
+# If user uploads, load + reset widget state so it shows
+if uploaded_corr is not None:
+    corr_store = pd.read_excel(uploaded_corr, index_col=0)
+    st.session_state["corr_store"] = corr_store.copy()
+    st.session_state.pop("corr_widget", None)
+
+# Always align to current LTCMA assets
+corr_base = ensure_corr_shape(ltcma_df.index, st.session_state.get("corr_store"))
+
+# Build numeric column config for the editor
+float_config = {
+    c: st.column_config.NumberColumn(label=c, min_value=-1.0, max_value=1.0, step=0.01, format="%.2f")
+    for c in corr_base.columns
+}
+
+# Render the editor (never write to this key in code)
+corr_return = st.data_editor(
+    corr_base,
+    use_container_width=True,
+    column_config=float_config,
+    key="corr_widget"
+)
+
+# Optional gentle hint if the matrix isn't symmetric
+try:
+    if not np.allclose(corr_return.values, corr_return.values.T, atol=1e-10, equal_nan=True):
+        st.info("Matrix isn’t symmetric. Click ↔ Symmetrize to fix.")
+except Exception:
+    pass
+
+# If the button is clicked, symmetrize, persist, refresh editor, and clear derived outputs
+if symm_click:
+    sym = (corr_return + corr_return.T) / 2.0
+    sym = sym.clip(-1.0, 1.0)
+    np.fill_diagonal(sym.values, 1.0)
+
+    st.session_state["corr_store"] = sym.copy()
+    st.session_state["prev_corr_df"] = sym.copy()
+
+    # Clear dependent outputs and force the editor to rebuild with the symmetrized values
     st.session_state.pop("portfolio_paths", None)
     st.session_state.pop("x_axis", None)
+    st.session_state.pop("corr_widget", None)
     st.rerun()
 
-if not corr_matrix.equals(corr_matrix.T):
-    st.error("Correlation matrix must be symmetric.")
-    st.stop()
+# Normal path (no click): use edited value as-is, with diag forced to 1
+corr_matrix = corr_return.copy()
+np.fill_diagonal(corr_matrix.values, 1.0)
+
+# Persist clean copy to your store, and clear derived outputs if changed
+if not corr_matrix.equals(st.session_state.get("prev_corr_df")):
+    st.session_state["prev_corr_df"] = corr_matrix.copy()
+    st.session_state["corr_store"] = corr_matrix.copy()
+    st.session_state.pop("portfolio_paths", None)
+    st.session_state.pop("x_axis", None)
 
 
 
@@ -471,7 +480,7 @@ if not corr_matrix.equals(corr_matrix.T):
 # Simulation Input Check
 if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_matrix.index):
     ltcma_df = ltcma_df.loc[ltcma_df.index.intersection(corr_matrix.index)]
-    st.session_state["ltcma_df"] = ltcma_df.copy()
+#    st.session_state["ltcma_df"] = ltcma_df.copy()
 
     frequency_map = {"monthly": 12, "quarterly": 4, "yearly": 1}
     date_freq_map = {"monthly": "ME", "quarterly": "QE", "yearly": "YE"}
@@ -699,10 +708,11 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
             st.error("No scenario file uploaded. Please upload a CSV or Excel file with scenarios.")
         elif selected_scenario is None:
             st.error("No scenario selected. Please select a scenario from the dropdown.")
-        elif "ltcma_df" not in st.session_state:
+#        elif "ltcma_store" not in st.session_state:
+        elif ltcma_df.empty:
             st.error("LTCMA data not available. Please upload or define LTCMA first.")
         else:
-            ltcma_df = st.session_state["ltcma_df"]
+            #ltcma_df = st.session_state["ltcma_store"]
             st.subheader(f"Impact of Historical Scenario: {selected_scenario}")
 
             scenario_row = scenarios_df[scenarios_df.iloc[:, 0].astype(str) == selected_scenario]
@@ -748,15 +758,6 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
 
                     st.markdown(f"**Portfolio Return under Scenario '{selected_scenario}':** {scenario_return:.2%}")
 
-
-#######################################################
-
-
-#if "portfolio_paths" in st.session_state and "x_axis" in st.session_state:
-# if st.session_state.simulation_has_run:   #v3.2.1
-#if st.session_state.simulation_has_run and st.session_state["portfolio_paths"] is not None and st.session_state["x_axis"] is not None:
-
-# if st.session_state.get("simulation_has_run") and st.session_state.get("portfolio_paths") is not None and st.session_state.get("x_axis") is not None:   #v4.3
 
 
 
@@ -1212,8 +1213,5 @@ with tab4:
                     key="download_drawdown_excel"
                 )
             
-
-# else:
-#    st.info("Please run a simulation to view results.")
 
 
