@@ -89,7 +89,13 @@ import base64
 import hashlib
 
 
-APP_VERSION = "v4.9.0"
+APP_VERSION = "v4.10.3"
+
+# ---- default data files (edit paths as needed) ----
+DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
+DEFAULT_CORR_PATH = "Data/Correlation Matrix.xlsx"
+DEFAULT_SCENARIO_PATH = "Data/Scenarios.xlsx"
+
 
 
 # Helper to detect DataFrame changes
@@ -97,10 +103,14 @@ def df_hash(df: pd.DataFrame) -> int:
     """Return an integer hash for a DataFrame."""
     return int(pd.util.hash_pandas_object(df, index=True).sum())
 
-# ---- default data files (edit paths as needed) ----
-DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
-DEFAULT_CORR_PATH = "Data/Correlation Matrix.xlsx"
-DEFAULT_SCENARIO_PATH = "Data/Scenarios.xlsx"
+# Ensure the correlation matrix has the proper shape
+def ensure_corr_shape(assets: pd.Index, corr_df: pd.DataFrame | None) -> pd.DataFrame:
+    if corr_df is None or getattr(corr_df, "empty", True):
+        return pd.DataFrame(np.eye(len(assets)), index=assets, columns=assets)
+    out = corr_df.reindex(index=assets, columns=assets)
+    out = out.fillna(0.0)
+    np.fill_diagonal(out.values, 1.0)
+    return out
 
 
 st.set_page_config(layout="wide")
@@ -138,6 +148,9 @@ st.session_state.simulation_has_run = (
     and st.session_state["x_axis"] is not None
 )
 # v4.3 ----------
+
+
+
 
 
 # Sidebar Inputs referencing session_state directly
@@ -259,17 +272,54 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
-# v3.1  Save / Restore controls
-col_save, col_restore , col_dummy = st.columns([1, 1, 2])
+
+def get_current_ltcma_and_corr_for_save() -> tuple[pd.DataFrame, pd.DataFrame]:
+    # Try most recent edited table, then base default, then disk, then a tiny inline fallback
+    ltc = st.session_state.get("prev_ltcma_df")
+    if ltc is None:
+        ltc = st.session_state.get("ltcma_base_default")
+    if ltc is None:
+        try:
+            ltc = pd.read_excel(DEFAULT_LTCMA_PATH, index_col=0)
+        except Exception:
+            ltc = pd.DataFrame({
+                "Exp Return": [0.06, 0.03, 0.08],
+                "Exp Volatility": [0.10, 0.05, 0.15],
+                "SAA": [0.5, 0.3, 0.2],
+                "Min": [0.0, 0.0, 0.0],
+                "Max": [1.0, 1.0, 1.0]
+            }, index=["Equities", "Bonds", "Alternatives"])
+
+    # light hygiene
+    ltc = ltc.copy()
+    ltc.index = ltc.index.astype(str).str.strip()
+    ltc = ltc.loc[ltc.index != ""]
+
+    # Corr uses whatever is in the store, reshaped to match the LTCMA index
+    corr = ensure_corr_shape(ltc.index, st.session_state.get("corr_store"))
+    return ltc, corr
+
+
+# --- Save / Restore controls (safe to keep above editors) ---
+col_save, col_restore, col_dummy = st.columns([1, 1, 2])
 
 with col_save:
     if st.button("💾 Save Session", key="save_session_main"):
+        ltcma_current, corr_current = get_current_ltcma_and_corr_for_save()
+
+        # Make optimized_weights storable & aligned (Series or None)
+        opt = st.session_state.get("optimized_weights", None)
+        if isinstance(opt, pd.Series):
+            opt_to_save = opt.reindex(ltcma_current.index)
+        elif isinstance(opt, np.ndarray) and len(opt) == len(ltcma_current.index):
+            opt_to_save = pd.Series(opt, index=ltcma_current.index)
+        else:
+            opt_to_save = None
+
         session_data = {
-            # save the cleaned, current table you already computed for calculations
-            "ltcma_df": ltcma_df.copy(),
-            # save the correlation from the store (fallback to current matrix if needed)
-            "corr_matrix": ensure_corr_shape(ltcma_df.index, st.session_state.get("corr_store")).copy(),
-            "optimized_weights": st.session_state.get("optimized_weights", None),
+            "ltcma_df": ltcma_current.copy(),
+            "corr_matrix": corr_current.copy(),
+            "optimized_weights": opt_to_save,
             "sim_params": {
                 "start_date": st.session_state["start_date"],
                 "n_years": st.session_state["n_years"],
@@ -282,47 +332,38 @@ with col_save:
         buffer = BytesIO()
         pickle.dump(session_data, buffer)
         b64 = base64.b64encode(buffer.getvalue()).decode()
-        href = f'<a href="data:file/octet-stream;base64,{b64}" download="saa_session.pkl">Download Session File</a>'
-        st.markdown(href, unsafe_allow_html=True)
+        st.markdown(
+            f'<a href="data:file/octet-stream;base64,{b64}" download="saa_session.pkl">Download Session File</a>',
+            unsafe_allow_html=True
+        )
 
 with col_restore:
     if st.button("↩️ Restore Defaults", key="restore_defaults", help="Load default LTCMA, Correlation, and Scenarios"):
         try:
             ltcma_default = pd.read_excel(DEFAULT_LTCMA_PATH, index_col=0)
-            corr_default = pd.read_excel(DEFAULT_CORR_PATH, index_col=0)
+            corr_default  = pd.read_excel(DEFAULT_CORR_PATH, index_col=0)
             scenarios_default = pd.read_excel(DEFAULT_SCENARIO_PATH)
 
-            # basic alignment and hygiene
-            # ensure corr rows/cols match LTCMA index
-            corr_default = corr_default.reindex(index=ltcma_default.index, columns=ltcma_default.index)
-            corr_default.fillna(0.0, inplace=True)
+            corr_default = corr_default.reindex(index=ltcma_default.index, columns=ltcma_default.index).fillna(0.0)
             np.fill_diagonal(corr_default.values, 1.0)
 
-            # write into session and clear derived caches
-             # put defaults into stores (not widget keys)
             st.session_state["ltcma_base_default"] = ltcma_default.copy()
             st.session_state["corr_store"] = corr_default.copy()
             st.session_state["corr_assets"] = tuple(ltcma_default.index.tolist())
             st.session_state["default_scenarios_df"] = scenarios_default.copy()
 
-            # force both editors to rebuild with defaults
+            # force editors to rebuild + clear derived state
             st.session_state.pop("ltcma_widget", None)
             st.session_state.pop("corr_widget", None)
-
-            # clear derived outputs and previous-change caches
             for k in ["portfolio_paths", "x_axis", "optimized_weights", "prev_ltcma_df", "prev_corr_df"]:
                 st.session_state.pop(k, None)
 
             st.success("Defaults restored.")
             st.rerun()
-
-
-
-
-            
         except Exception as e:
             st.error(f"Failed to restore defaults: {e}")
-#v3.1
+# --- end save/restore ---
+
 
 # --- LTCMA (live editor, no Apply) ---
 
@@ -373,13 +414,13 @@ if prev_ltcma is None or not ltcma_df.equals(prev_ltcma):
 
 
 
-def ensure_corr_shape(assets: pd.Index, corr_df: pd.DataFrame | None) -> pd.DataFrame:
-    if corr_df is None or getattr(corr_df, "empty", True):
-        return pd.DataFrame(np.eye(len(assets)), index=assets, columns=assets)
-    out = corr_df.reindex(index=assets, columns=assets)
-    out = out.fillna(0.0)
-    np.fill_diagonal(out.values, 1.0)
-    return out
+#def ensure_corr_shape(assets: pd.Index, corr_df: pd.DataFrame | None) -> pd.DataFrame:
+#    if corr_df is None or getattr(corr_df, "empty", True):
+#        return pd.DataFrame(np.eye(len(assets)), index=assets, columns=assets)
+#    out = corr_df.reindex(index=assets, columns=assets)
+#    out = out.fillna(0.0)
+#    np.fill_diagonal(out.values, 1.0)
+#    return out
 
 
 
@@ -721,42 +762,74 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
             else:
                 scenario_row = scenario_row.iloc[0, 1:]
 
-                if len(scenario_row) != len(ltcma_df):
-                    st.error("Scenario does not match number of asset classes in LTCMA.")
+                # --- Align scenario vector to current LTCMA assets ---
+                # 1) normalize labels
+                scenario_row.index = scenario_row.index.astype(str).str.strip()
+                ltcma_assets = ltcma_df.index  # already stripped earlier
+
+                # 2) align to LTCMA; extras are silently dropped, missing are filled with 0
+                
+                #extra_assets = [c for c in scenario_row.index if c not in ltcma_assets]
+                scenario_aligned = scenario_row.reindex(ltcma_assets)
+                missing_assets = scenario_aligned[scenario_aligned.isna()].index.tolist()
+                scenario_aligned = scenario_aligned.fillna(0.0)
+
+                # 3) choose weights as a Series aligned to LTCMA assets
+                if use_opt_in_scenario and "optimized_weights" in st.session_state:
+                    weights_used = (
+                        st.session_state["optimized_weights"]
+                        .reindex(ltcma_assets)
+                        .fillna(0.0)
+                    )
                 else:
+                    weights_used = ltcma_df["SAA"]  # already indexed by ltcma_assets
 
-                    # NEW LOGIC: use optimized weights if checkbox is checked and weights are available
-                    if use_opt_in_scenario and "optimized_weights" in st.session_state:
-                        weights_used = st.session_state["optimized_weights"]
-                    else:
-                        weights_used = ltcma_df["SAA"].values
-                    scenario_return = np.dot(scenario_row.values, weights_used)
-                    impact_df = pd.DataFrame({
-                        "Asset Class": scenario_row.index,
-                        "Shock Return": scenario_row.values,
-                        "Weight": pd.Series(weights_used, index=ltcma_df.index)
-                    })
-                    impact_df["Contribution"] = impact_df["Shock Return"] * impact_df["Weight"]
+                # 4) compute portfolio scenario return (both Series share index)
+                scenario_return = float((scenario_aligned * weights_used).sum())
 
-                    # Format numerical columns manually before displaying
-                    formatted_df = impact_df.copy()
-                    formatted_df["Shock Return"] = (formatted_df["Shock Return"] * 100).map("{:.2f}%".format)
-                    formatted_df["Contribution"] = (formatted_df["Contribution"] * 100).map("{:.2f}%".format)
+                # 5) optional notices
+ #               if extra_assets:
+  #                  st.info(
+   #                     "Ignored scenario assets not in LTCMA: "
+    #                    + ", ".join(map(str, extra_assets))
+     #               )
+                if missing_assets:
+                    st.info(
+                        "Assets missing in scenario (assumed 0% shock): "
+                        + ", ".join(map(str, missing_assets))
+                    )
 
-                    st.dataframe(formatted_df)
+                # 6) build contribution table using aligned vectors
+                impact_df = pd.DataFrame(
+                    {
+                        "Asset Class": ltcma_assets,
+                        "Shock Return": scenario_aligned.values,
+                        "Weight": weights_used.values,
+                    },
+                    index=ltcma_assets,
+                )
+                impact_df["Contribution"] = impact_df["Shock Return"] * impact_df["Weight"]
+
+                # Format numerical columns for display
+                formatted_df = impact_df.copy()
+                formatted_df["Shock Return"] = (formatted_df["Shock Return"] * 100).map("{:.2f}%".format)
+                formatted_df["Contribution"] = (formatted_df["Contribution"] * 100).map("{:.2f}%".format)
+
+                st.dataframe(formatted_df)
 
 
-                    fig, ax = plt.subplots(figsize=(7, 4))
-                    ax.bar(impact_df["Asset Class"], impact_df["Contribution"], color="cornflowerblue")
-                    ax.axhline(scenario_return, color='red', linestyle='--', label=f"Total: {scenario_return:.2%}")
-                    ax.set_title("Contribution to Portfolio Return under Scenario")
-                    ax.set_ylabel("Contribution")
-                    ax.set_xlabel("Asset Class")
-                    ax.tick_params(axis='x', rotation=30, labelsize=9)
-                    ax.legend()
-                    st.pyplot(fig)
 
-                    st.markdown(f"**Portfolio Return under Scenario '{selected_scenario}':** {scenario_return:.2%}")
+                fig, ax = plt.subplots(figsize=(7, 4))
+                ax.bar(impact_df["Asset Class"], impact_df["Contribution"], color="cornflowerblue")
+                ax.axhline(scenario_return, color='red', linestyle='--', label=f"Total: {scenario_return:.2%}")
+                ax.set_title("Contribution to Portfolio Return under Scenario")
+                ax.set_ylabel("Contribution")
+                ax.set_xlabel("Asset Class")
+                ax.tick_params(axis='x', rotation=30, labelsize=9)
+                ax.legend()
+                st.pyplot(fig)
+
+                st.markdown(f"**Portfolio Return under Scenario '{selected_scenario}':** {scenario_return:.2%}")
 
 
 
