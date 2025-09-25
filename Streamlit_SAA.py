@@ -407,33 +407,13 @@ for c in ["Exp Return", "Exp Volatility", "SAA", "Min", "Max"]:
 
 # Render the editor. IMPORTANT: use the return value; do NOT read st.session_state["ltcma_widget"].
 
-# Decide once which arg to use, then make a single call
-def _supports_width_string():
-    try:
-        major, minor, patch = (int(x) for x in st.__version__.split(".")[:3])
-        # Bump this threshold up/down based on your install; keep legacy until you upgrade
-        return (major, minor) >= (1, 999)  # force legacy path for now
-    except Exception:
-        return False
-
-if _supports_width_string():
-    ltcma_return = st.data_editor(
-        base_ltcma,
-        num_rows="dynamic",
-        width="stretch",        # new API
-        key="ltcma_widget",
-    )
-else:
-    ltcma_return = st.data_editor(
-        base_ltcma,
-        num_rows="dynamic",
-        # use_container_width=True,  # legacy API
-        width="stretch",        # new API
-        key="ltcma_widget",
-    )
-
-
-
+ltcma_return = st.data_editor(
+    base_ltcma,
+    num_rows="dynamic",
+    # use_container_width=True,  # TODO for Web (Streamlit new API): replace with width="stretch"
+    width="stretch",         # new API
+    key="ltcma_widget"
+)
 
 # Light hygiene on a copy for calculations ONLY (don’t write back to widget)
 ltcma_df = ltcma_return.copy()
@@ -498,21 +478,13 @@ float_config = {
 }
 
 # Render the editor (never write to this key in code)
-if _supports_width_string():
-    corr_return = st.data_editor(
-        corr_base,
-        width="stretch",
-        column_config=float_config,
-        key="corr_widget",
-    )
-else:
-    corr_return = st.data_editor(
-        corr_base,
-        #use_container_width=True,
-        width="stretch",
-        column_config=float_config,
-        key="corr_widget",
-    )
+corr_return = st.data_editor(
+    corr_base,
+    # use_container_width=True,  # TODO(Streamlit new API): replace with width="stretch"
+    width="stretch"           # for Web version
+    column_config=float_config,
+    key="corr_widget"
+)
 
 
 
@@ -1330,6 +1302,5 @@ with tab4:
                     key="download_drawdown_excel"
                 )
             
-
 
 
