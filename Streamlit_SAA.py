@@ -96,6 +96,7 @@ Author:
 import streamlit as st
 import pandas as pd
 import numpy as np
+#import sys
 import matplotlib
 matplotlib.use('Agg')  # explicitly set backend
 import matplotlib.pyplot as plt
@@ -108,7 +109,7 @@ import pickle
 import base64
 
 
-APP_VERSION = "v4.12.0"
+APP_VERSION = "v4.12.1"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -405,12 +406,33 @@ for c in ["Exp Return", "Exp Volatility", "SAA", "Min", "Max"]:
         base_ltcma[c] = pd.to_numeric(base_ltcma[c], errors="coerce").astype(float)
 
 # Render the editor. IMPORTANT: use the return value; do NOT read st.session_state["ltcma_widget"].
-ltcma_return = st.data_editor(
-    base_ltcma,
-    num_rows="dynamic",
-    use_container_width=True,
-    key="ltcma_widget"
-)
+
+# Decide once which arg to use, then make a single call
+def _supports_width_string():
+    try:
+        major, minor, patch = (int(x) for x in st.__version__.split(".")[:3])
+        # Bump this threshold up/down based on your install; keep legacy until you upgrade
+        return (major, minor) >= (1, 999)  # force legacy path for now
+    except Exception:
+        return False
+
+if _supports_width_string():
+    ltcma_return = st.data_editor(
+        base_ltcma,
+        num_rows="dynamic",
+        width="stretch",        # new API
+        key="ltcma_widget",
+    )
+else:
+    ltcma_return = st.data_editor(
+        base_ltcma,
+        num_rows="dynamic",
+        use_container_width=True,  # legacy API
+        key="ltcma_widget",
+    )
+
+
+
 
 # Light hygiene on a copy for calculations ONLY (don’t write back to widget)
 ltcma_df = ltcma_return.copy()
@@ -475,12 +497,22 @@ float_config = {
 }
 
 # Render the editor (never write to this key in code)
-corr_return = st.data_editor(
-    corr_base,
-    use_container_width=True,
-    column_config=float_config,
-    key="corr_widget"
-)
+if _supports_width_string():
+    corr_return = st.data_editor(
+        corr_base,
+        width="stretch",
+        column_config=float_config,
+        key="corr_widget",
+    )
+else:
+    corr_return = st.data_editor(
+        corr_base,
+        use_container_width=True,
+        column_config=float_config,
+        key="corr_widget",
+    )
+
+
 
 # Gentle hint if the matrix isn't symmetric
 try:
@@ -1296,6 +1328,5 @@ with tab4:
                     key="download_drawdown_excel"
                 )
             
-
 
 
