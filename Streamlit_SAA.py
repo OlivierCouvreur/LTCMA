@@ -62,6 +62,27 @@ Dependencies:
 - SciPy
 - Matplotlib
 
+
+IDEAS / SUGGESTIONS / TO-DO NEXT:
+v4.x
+- Export portfolio paths to XL, not CSV --  DONE v4.11.5
+- change the layout to put all things related to the session into the sidebar --  DONE  v4.11.2
+- Toggle the Y axis for simulations between Linear and Log ?  -- DONE v4.12.0
+
+v5.x
+- incorporate the historical simulation part, meaning we need an interface to upload historical returns
+    this means finding a way to circumvent / or defining what to do when data is missing
+- potentially, change the interface to allow two portfolio comparison, sort of before/after
+- prepare a slim or stripped down version for demo and/or Retail clients
+- version multi langues?
+- Input table: add the possibility of grouping Assets by Group (Asset Classes or Liquid/Illiquid, or other?)
+            + add the ability to put min/max on Groups
+- revamp the "double(s)' target in a more general way, like
+        set a target, define if static or linked to inflate, and give options to *2, *3, *X, Set Value
+        maybe even give a timeline, like a big upcoming Cash Flow, to get back the proba to achieve it
+        maybe, in optimizer, set this as a strict constraint (i need to reach this by then, with certainty / (or X% proba?) )
+
+
 Author:
 -------
 [Olivier Couvreur]
@@ -75,7 +96,7 @@ Author:
 import streamlit as st
 import pandas as pd
 import numpy as np
-import sys
+#import sys
 import matplotlib
 matplotlib.use('Agg')  # explicitly set backend
 import matplotlib.pyplot as plt
@@ -86,10 +107,9 @@ from scipy.stats import t
 from pathlib import Path  # For safer file suffix handling
 import pickle
 import base64
-import hashlib
 
 
-APP_VERSION = "v4.10.3"
+APP_VERSION = "v4.12.0"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -99,9 +119,9 @@ DEFAULT_SCENARIO_PATH = "Data/Scenarios.xlsx"
 
 
 # Helper to detect DataFrame changes
-def df_hash(df: pd.DataFrame) -> int:
-    """Return an integer hash for a DataFrame."""
-    return int(pd.util.hash_pandas_object(df, index=True).sum())
+#def df_hash(df: pd.DataFrame) -> int:
+#    """Return an integer hash for a DataFrame."""
+#    return int(pd.util.hash_pandas_object(df, index=True).sum())
 
 # Ensure the correlation matrix has the proper shape
 def ensure_corr_shape(assets: pd.Index, corr_df: pd.DataFrame | None) -> pd.DataFrame:
@@ -120,9 +140,9 @@ st.title("SAA Portfolio Monte Carlo Simulator")
 
 # Initialize default session state
 default_values = {
-    "start_date": pd.to_datetime("2024-10-01"),
+    "start_date": pd.to_datetime("2025-01-01"),
     "n_years": 10,
-    "initial_value": 200.0,
+    "initial_value": 100.0,
     "frequency": "monthly",
     "n_sims": 2000,
     "use_optimized_weights": False
@@ -148,129 +168,6 @@ st.session_state.simulation_has_run = (
     and st.session_state["x_axis"] is not None
 )
 # v4.3 ----------
-
-
-
-
-
-# Sidebar Inputs referencing session_state directly
-st.sidebar.header("Simulation Parameters")
-
-with st.sidebar.expander("Session Management"):
-    uploaded_session = st.file_uploader("Reload Saved Session", type=["pkl"], key="session_uploader")
-    if uploaded_session is not None and st.session_state.get("session_loaded") != uploaded_session.name:
-        try:
-            session_data = pickle.load(uploaded_session)
-
-            # Restore tables into stores (not widget keys)
-            st.session_state["ltcma_base_default"] = session_data["ltcma_df"].copy()
-            st.session_state["corr_store"] = session_data["corr_matrix"].copy()
-            st.session_state["corr_assets"] = tuple(session_data["ltcma_df"].index.tolist())
-
-            # force editors to rebuild using the restored data
-            st.session_state.pop("ltcma_widget", None)
-            st.session_state.pop("corr_widget", None)
-
-            # clear derived outputs
-            for k in ["portfolio_paths", "x_axis", "optimized_weights", "prev_ltcma_df", "prev_corr_df"]:
-                st.session_state.pop(k, None)
-
-
-            # Restore parameters explicitly
-            sim_params = session_data.get("sim_params", {})
-            for param_key, param_value in sim_params.items():
-                st.session_state[param_key] = param_value
-
-            st.success("Session reloaded successfully.")
-
-            # Mark session as loaded to avoid repeated reload
-            st.session_state["session_loaded"] = uploaded_session.name
-
-            st.rerun()  # Safely refresh once
-        except Exception as e:
-            st.error(f"Failed to reload session: {e}")
-
-
-# UI Widgets using st.session_state
-start_date = st.sidebar.date_input("Start Date", value=st.session_state["start_date"], key="start_date")
-n_years = st.sidebar.slider("Investment Horizon (Years)", 1, 30, st.session_state["n_years"], key="n_years")
-frequency = st.sidebar.selectbox(
-    "Frequency", ["monthly", "quarterly", "yearly"],
-    index=["monthly", "quarterly", "yearly"].index(st.session_state["frequency"]),
-    key="frequency"
-)
-initial_value = st.sidebar.number_input("Initial Portfolio Value", value=st.session_state["initial_value"], key="initial_value")
-n_sims = st.sidebar.slider("Number of Simulations", 100, 5000, st.session_state["n_sims"], step=100, key="n_sims")
-
-
-with st.sidebar.expander("Optional Display Settings"):
-    n_paths_to_plot = st.slider("Paths to Display", 0, 50, 0)
-    n_extreme_paths = st.slider("Extreme Paths (for Avg)", 0, 10, 0)
-    show_double_initial = st.checkbox("Show Double Initial Value", value=False)
-    show_double_with_inflation = st.checkbox("Show Double with Inflation", value=False)
-    inflation_rate = st.number_input("Inflation Rate (for compounding)", value=0.025, step=0.001, format="%.3f")
-
-with st.sidebar.expander("Value at Risk (VaR) Settings"):
-    var_years = st.slider("VaR Horizon (Years)", 1, 10, 1)
-    var_confidence = st.slider("VaR Confidence Level (%)", 90, 99, 95)
-    fat_tail_df = st.slider("Tail Thickness (Student-t df)", min_value=3, max_value=30, value=5, step=1)
-    
-# Efficient Frontier Parameters
-with st.sidebar.expander("Efficient Frontier Parameters"):
-    risk_free_rate = st.number_input("Risk-Free Rate", value=0.02, step=0.001, format="%.3f")
-    show_cml = st.checkbox("Show Capital Market Line (CML)", value=True)
-    show_saa = st.checkbox("Show Current SAA Portfolio", value=True)
-
-# Optimization Parameters
-with st.sidebar.expander("Optimization"):
-    optimization_mode = st.radio("Optimization Mode", ["Max Return", "Min Volatility"])
-    max_vol_limit = st.number_input("Max Volatility (for Max Return)", value=0.20, step=0.001, format="%.3f")
-    min_return_limit = st.number_input("Min Return (for Min Volatility)", value=0.04, step=0.001, format="%.3f")
-    use_optimized_weights = st.checkbox("Use Optimized Weights in Simulation", value=False)
-
-# Scenario Analysis
-with st.sidebar.expander("Historical Scenario Analysis"):
-    #scenario_file = st.file_uploader("Upload Historical Scenarios (CSV or Excel)", type=["csv", "xlsx"])
-    scenario_file = st.file_uploader("Upload Historical Scenarios", type=["xlsx"])
-    selected_scenario = None
-    scenarios_df = None
-    use_opt_in_scenario = st.checkbox("Use Optimized Weights in Scenario", value=False)
-
-    if scenario_file is not None:
-        file_suffix = Path(scenario_file.name).suffix.lower()
-        try:
-            if file_suffix == ".csv":
-                scenarios_df = pd.read_csv(scenario_file)
-            elif file_suffix == ".xlsx":
-                scenarios_df = pd.read_excel(scenario_file)
-            else:
-                st.warning("Unsupported file type for scenario upload.")
-        except Exception as e:
-            st.error(f"Error reading scenario file: {e}")
-
-        if scenarios_df is not None and not scenarios_df.empty:
-            #st.write("### Debug: Loaded Scenario Data")
-            #st.write(scenarios_df.head())
-            scenario_names = scenarios_df.iloc[:, 0].astype(str).tolist()
-            selected_scenario = st.selectbox("Select Scenario", scenario_names)
-
-st.sidebar.markdown(
-    f"""
-    <style>
-      .app-version-badge {{
-        position: fixed;
-        bottom: 10px;
-        left: 12px;
-        right: 12px;
-        font-size: 0.8rem;
-        color: #6b7280; /* muted grey */
-        opacity: 0.9;
-      }}
-    </style>
-    <div class="app-version-badge">Version {APP_VERSION}</div>
-    """,
-    unsafe_allow_html=True,
-)
 
 
 def get_current_ltcma_and_corr_for_save() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -300,69 +197,185 @@ def get_current_ltcma_and_corr_for_save() -> tuple[pd.DataFrame, pd.DataFrame]:
     return ltc, corr
 
 
-# --- Save / Restore controls (safe to keep above editors) ---
-col_save, col_restore, col_dummy = st.columns([1, 1, 2])
+# Sidebar Inputs referencing session_state directly
+st.sidebar.header("Simulation Parameters")
 
-with col_save:
-    if st.button("💾 Save Session", key="save_session_main"):
-        ltcma_current, corr_current = get_current_ltcma_and_corr_for_save()
+with st.sidebar.expander("Session Management"):
+    uploaded_session = st.file_uploader("Reload Saved Session", type=["pkl"], key="session_uploader")
+    c1, c2 = st.columns(2)
+ 
+    with c1:
+        if st.button("💾 Save Session", key="save_session_main"):
+            ltcma_current, corr_current = get_current_ltcma_and_corr_for_save()
 
-        # Make optimized_weights storable & aligned (Series or None)
-        opt = st.session_state.get("optimized_weights", None)
-        if isinstance(opt, pd.Series):
-            opt_to_save = opt.reindex(ltcma_current.index)
-        elif isinstance(opt, np.ndarray) and len(opt) == len(ltcma_current.index):
-            opt_to_save = pd.Series(opt, index=ltcma_current.index)
-        else:
-            opt_to_save = None
+            # Make optimized_weights storable & aligned (Series or None)
+            opt = st.session_state.get("optimized_weights", None)
+            if isinstance(opt, pd.Series):
+                opt_to_save = opt.reindex(ltcma_current.index)
+            elif isinstance(opt, np.ndarray) and len(opt) == len(ltcma_current.index):
+                opt_to_save = pd.Series(opt, index=ltcma_current.index)
+            else:
+                opt_to_save = None
 
-        session_data = {
-            "ltcma_df": ltcma_current.copy(),
-            "corr_matrix": corr_current.copy(),
-            "optimized_weights": opt_to_save,
-            "sim_params": {
-                "start_date": st.session_state["start_date"],
-                "n_years": st.session_state["n_years"],
-                "initial_value": st.session_state["initial_value"],
-                "frequency": st.session_state["frequency"],
-                "n_sims": st.session_state["n_sims"],
-                "use_optimized_weights": st.session_state["use_optimized_weights"],
-            },
-        }
-        buffer = BytesIO()
-        pickle.dump(session_data, buffer)
-        b64 = base64.b64encode(buffer.getvalue()).decode()
-        st.markdown(
-            f'<a href="data:file/octet-stream;base64,{b64}" download="saa_session.pkl">Download Session File</a>',
-            unsafe_allow_html=True
-        )
+            session_data = {
+                "ltcma_df": ltcma_current.copy(),
+                "corr_matrix": corr_current.copy(),
+                "optimized_weights": opt_to_save,
+                "sim_params": {
+                    "start_date": st.session_state["start_date"],
+                    "n_years": st.session_state["n_years"],
+                    "initial_value": st.session_state["initial_value"],
+                    "frequency": st.session_state["frequency"],
+                    "n_sims": st.session_state["n_sims"],
+                    "use_optimized_weights": st.session_state["use_optimized_weights"],
+                },
+            }
+            buffer = BytesIO()
+            pickle.dump(session_data, buffer)
+            b64 = base64.b64encode(buffer.getvalue()).decode()
+            st.markdown(
+                f'<a href="data:file/octet-stream;base64,{b64}" download="saa_session.pkl">Download Session File</a>',
+                unsafe_allow_html=True
+            )
 
-with col_restore:
-    if st.button("↩️ Restore Defaults", key="restore_defaults", help="Load default LTCMA, Correlation, and Scenarios"):
+    with c2:
+        if st.button("↩️ Restore Defaults", key="restore_defaults", help="Load default LTCMA, Correlation, and Scenarios"):
+            try:
+                ltcma_default = pd.read_excel(DEFAULT_LTCMA_PATH, index_col=0)
+                corr_default  = pd.read_excel(DEFAULT_CORR_PATH, index_col=0)
+                scenarios_default = pd.read_excel(DEFAULT_SCENARIO_PATH)
+
+                corr_default = corr_default.reindex(index=ltcma_default.index, columns=ltcma_default.index).fillna(0.0)
+                np.fill_diagonal(corr_default.values, 1.0)
+
+                st.session_state["ltcma_base_default"] = ltcma_default.copy()
+                st.session_state["corr_store"] = corr_default.copy()
+                st.session_state["corr_assets"] = tuple(ltcma_default.index.tolist())
+                st.session_state["default_scenarios_df"] = scenarios_default.copy()
+
+                # force editors to rebuild + clear derived state
+                st.session_state.pop("ltcma_widget", None)
+                st.session_state.pop("corr_widget", None)
+                for k in ["portfolio_paths", "x_axis", "optimized_weights", "prev_ltcma_df", "prev_corr_df"]:
+                    st.session_state.pop(k, None)
+
+                st.success("Defaults restored.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to restore defaults: {e}")
+    # --- end save/restore ---
+
+    
+    if uploaded_session is not None and st.session_state.get("session_loaded") != uploaded_session.name:
         try:
-            ltcma_default = pd.read_excel(DEFAULT_LTCMA_PATH, index_col=0)
-            corr_default  = pd.read_excel(DEFAULT_CORR_PATH, index_col=0)
-            scenarios_default = pd.read_excel(DEFAULT_SCENARIO_PATH)
+            session_data = pickle.load(uploaded_session)
+            assert "ltcma_df" in session_data and "sim_params" in session_data, "Invalid session file"
+            
+            # Restore tables into stores (not widget keys)
+            st.session_state["ltcma_base_default"] = session_data["ltcma_df"].copy()
+            st.session_state["corr_store"] = session_data["corr_matrix"].copy()
+            st.session_state["corr_assets"] = tuple(session_data["ltcma_df"].index.tolist())
 
-            corr_default = corr_default.reindex(index=ltcma_default.index, columns=ltcma_default.index).fillna(0.0)
-            np.fill_diagonal(corr_default.values, 1.0)
-
-            st.session_state["ltcma_base_default"] = ltcma_default.copy()
-            st.session_state["corr_store"] = corr_default.copy()
-            st.session_state["corr_assets"] = tuple(ltcma_default.index.tolist())
-            st.session_state["default_scenarios_df"] = scenarios_default.copy()
-
-            # force editors to rebuild + clear derived state
+            # force editors to rebuild using the restored data
             st.session_state.pop("ltcma_widget", None)
             st.session_state.pop("corr_widget", None)
+
+            # clear derived outputs
             for k in ["portfolio_paths", "x_axis", "optimized_weights", "prev_ltcma_df", "prev_corr_df"]:
                 st.session_state.pop(k, None)
 
-            st.success("Defaults restored.")
-            st.rerun()
+
+            # Restore parameters explicitly
+            sim_params = session_data.get("sim_params", {})
+            for param_key, param_value in sim_params.items():
+                st.session_state[param_key] = param_value
+
+            st.success("Session reloaded successfully.")
+
+            # Mark session as loaded to avoid repeated reload
+            st.session_state["session_loaded"] = uploaded_session.name
+
+            st.rerun()  # Safely refresh once
         except Exception as e:
-            st.error(f"Failed to restore defaults: {e}")
-# --- end save/restore ---
+            st.error(f"Failed to reload session: {e}")
+            st.stop()
+
+# UI Widgets using st.session_state
+start_date = st.sidebar.date_input("Start Date", value=st.session_state["start_date"], key="start_date")
+n_years = st.sidebar.slider("Investment Horizon (Years)", 1, 30, st.session_state["n_years"], key="n_years")
+frequency = st.sidebar.selectbox(
+    "Frequency", ["monthly", "quarterly", "yearly"],
+    index=["monthly", "quarterly", "yearly"].index(st.session_state["frequency"]),
+    key="frequency"
+)
+initial_value = st.sidebar.number_input("Initial Portfolio Value", value=st.session_state["initial_value"], key="initial_value")
+n_sims = st.sidebar.slider("Number of Simulations", 100, 5000, st.session_state["n_sims"], step=100, key="n_sims")
+
+
+with st.sidebar.expander("Optional Display Settings"):
+    n_paths_to_plot = st.slider("Paths to Display", 0, 50, 0)
+    n_extreme_paths = st.slider("Extreme Paths (for Avg)", 0, 10, 0)
+    show_double_initial = st.checkbox("Show Double Initial Value", value=False)
+    show_double_with_inflation = st.checkbox("Show Double with Inflation", value=False)
+    inflation_rate = st.number_input("Inflation Rate (for compounding)", value=0.025, step=0.001, format="%.3f")
+    use_log_scale = st.checkbox("Log scale (Y axis)", value=False)
+    
+with st.sidebar.expander("Value at Risk (VaR) Settings"):
+    var_years = st.slider("VaR Horizon (Years)", 1, 10, 1)
+    var_confidence = st.slider("VaR Confidence Level (%)", 90, 99, 95)
+    fat_tail_df = st.slider("Tail Thickness (Student-t df)", min_value=3, max_value=30, value=5, step=1)
+    
+# Efficient Frontier Parameters
+with st.sidebar.expander("Efficient Frontier Parameters"):
+    risk_free_rate = st.number_input("Risk-Free Rate", value=0.02, step=0.001, format="%.3f")
+    show_cml = st.checkbox("Show Capital Market Line (CML)", value=True)
+    show_saa = st.checkbox("Show Current SAA Portfolio", value=True)
+
+# Optimization Parameters
+with st.sidebar.expander("Optimization"):
+    optimization_mode = st.radio("Optimization Mode", ["Max Return", "Min Volatility"])
+    max_vol_limit = st.number_input("Max Volatility (for Max Return)", value=0.20, step=0.001, format="%.3f")
+    min_return_limit = st.number_input("Min Return (for Min Volatility)", value=0.04, step=0.001, format="%.3f")
+    use_optimized_weights = st.checkbox("Use Optimized Weights in Simulation", value=False)
+
+# Scenario Analysis
+with st.sidebar.expander("Historical Scenario Analysis"):
+    scenario_file = st.file_uploader("Upload Historical Scenarios", type=["xlsx"])
+    selected_scenario = None
+    scenarios_df = None
+    use_opt_in_scenario = st.checkbox("Use Optimized Weights in Scenario", value=False)
+
+    if scenario_file is not None:
+        file_suffix = Path(scenario_file.name).suffix.lower()
+        try:
+            if file_suffix == ".xlsx":
+                scenarios_df = pd.read_excel(scenario_file)
+            else:
+                st.warning("Unsupported file type for scenario upload.")
+        except Exception as e:
+            st.error(f"Error reading scenario file: {e}")
+
+        if scenarios_df is not None and not scenarios_df.empty:
+            scenario_names = scenarios_df.iloc[:, 0].astype(str).tolist()
+            selected_scenario = st.selectbox("Select Scenario", scenario_names)
+
+st.sidebar.markdown(
+    f"""
+    <style>
+      .app-version-badge {{
+        position: fixed;
+        bottom: 10px;
+        left: 12px;
+        right: 12px;
+        font-size: 0.8rem;
+        color: #6b7280; /* muted grey */
+        opacity: 0.9;
+      }}
+    </style>
+    <div class="app-version-badge">Version {APP_VERSION}</div>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # --- LTCMA (live editor, no Apply) ---
@@ -386,6 +399,11 @@ if uploaded_ltcma is not None:
 else:
     # if the widget already has state, it will ignore this base
     base_ltcma = st.session_state.get("ltcma_base_default", DEFAULT_LTCMA)
+
+# Set the format to float    v4.11
+for c in ["Exp Return", "Exp Volatility", "SAA", "Min", "Max"]:
+    if c in base_ltcma.columns:
+        base_ltcma[c] = pd.to_numeric(base_ltcma[c], errors="coerce").astype(float)
 
 # Render the editor. IMPORTANT: use the return value; do NOT read st.session_state["ltcma_widget"].
 ltcma_return = st.data_editor(
@@ -412,18 +430,6 @@ if prev_ltcma is None or not ltcma_df.equals(prev_ltcma):
     st.session_state.pop("portfolio_paths", None)
     st.session_state.pop("x_axis", None)
 
-
-
-#def ensure_corr_shape(assets: pd.Index, corr_df: pd.DataFrame | None) -> pd.DataFrame:
-#    if corr_df is None or getattr(corr_df, "empty", True):
-#        return pd.DataFrame(np.eye(len(assets)), index=assets, columns=assets)
-#    out = corr_df.reindex(index=assets, columns=assets)
-#    out = out.fillna(0.0)
-#    np.fill_diagonal(out.values, 1.0)
-#    return out
-
-
-
 # --- keep corr editor in lockstep with LTCMA assets ---
 new_assets = tuple(ltcma_df.index.tolist())
 prev_assets = st.session_state.get("corr_assets")
@@ -433,11 +439,6 @@ if prev_assets is None or prev_assets != new_assets:
     st.session_state["corr_store"] = ensure_corr_shape(ltcma_df.index, st.session_state.get("corr_store"))
     st.session_state["corr_assets"] = new_assets
     st.session_state.pop("corr_widget", None)  # forces the editor to rebuild with new rows/cols
-
-
-
-
-
 
 # --- Correlation Matrix (live editor, auto-align to LTCMA) ---
 
@@ -466,7 +467,7 @@ if uploaded_corr is not None:
     st.session_state.pop("corr_widget", None)
 
 # Always align to current LTCMA assets
-corr_base = ensure_corr_shape(ltcma_df.index, st.session_state.get("corr_store"))
+corr_base = ensure_corr_shape(ltcma_df.index, st.session_state.get("corr_store")).astype(float)
 
 # Build numeric column config for the editor
 float_config = {
@@ -482,7 +483,7 @@ corr_return = st.data_editor(
     key="corr_widget"
 )
 
-# Optional gentle hint if the matrix isn't symmetric
+# Gentle hint if the matrix isn't symmetric
 try:
     if not np.allclose(corr_return.values, corr_return.values.T, atol=1e-10, equal_nan=True):
         st.info("Matrix isn’t symmetric. Click ↔ Symmetrize to fix.")
@@ -508,7 +509,7 @@ if symm_click:
 corr_matrix = corr_return.copy()
 np.fill_diagonal(corr_matrix.values, 1.0)
 
-# Persist clean copy to your store, and clear derived outputs if changed
+# Persist clean copy to the store, and clear derived outputs if changed
 if not corr_matrix.equals(st.session_state.get("prev_corr_df")):
     st.session_state["prev_corr_df"] = corr_matrix.copy()
     st.session_state["corr_store"] = corr_matrix.copy()
@@ -521,10 +522,9 @@ if not corr_matrix.equals(st.session_state.get("prev_corr_df")):
 # Simulation Input Check
 if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_matrix.index):
     ltcma_df = ltcma_df.loc[ltcma_df.index.intersection(corr_matrix.index)]
-#    st.session_state["ltcma_df"] = ltcma_df.copy()
 
     frequency_map = {"monthly": 12, "quarterly": 4, "yearly": 1}
-    date_freq_map = {"monthly": "ME", "quarterly": "QE", "yearly": "YE"}
+#    date_freq_map = {"monthly": "ME", "quarterly": "QE", "yearly": "YE"}
     steps_per_year = frequency_map[frequency]
     n_steps = n_years * steps_per_year
     dt = 1 / steps_per_year
@@ -749,11 +749,9 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
             st.error("No scenario file uploaded. Please upload a CSV or Excel file with scenarios.")
         elif selected_scenario is None:
             st.error("No scenario selected. Please select a scenario from the dropdown.")
-#        elif "ltcma_store" not in st.session_state:
         elif ltcma_df.empty:
             st.error("LTCMA data not available. Please upload or define LTCMA first.")
         else:
-            #ltcma_df = st.session_state["ltcma_store"]
             st.subheader(f"Impact of Historical Scenario: {selected_scenario}")
 
             scenario_row = scenarios_df[scenarios_df.iloc[:, 0].astype(str) == selected_scenario]
@@ -787,12 +785,6 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                 # 4) compute portfolio scenario return (both Series share index)
                 scenario_return = float((scenario_aligned * weights_used).sum())
 
-                # 5) optional notices
- #               if extra_assets:
-  #                  st.info(
-   #                     "Ignored scenario assets not in LTCMA: "
-    #                    + ", ".join(map(str, extra_assets))
-     #               )
                 if missing_assets:
                     st.info(
                         "Assets missing in scenario (assumed 0% shock): "
@@ -863,6 +855,10 @@ with tab1:
 
         fig, ax = plt.subplots(figsize=(10, 6))
 
+        # v4.12: switch to log scale if requested
+        if use_log_scale:
+            ax.set_yscale("log")
+
         if n_paths_to_plot > 0:
             for idx in np.random.choice(portfolio_paths.shape[1], n_paths_to_plot, replace=False):
                 color = np.random.rand(3,)  # random RGB
@@ -877,7 +873,6 @@ with tab1:
             ax.plot(x_axis, np.mean(portfolio_paths[:, worst_idx], axis=1), color='red', label='Avg Worst')
 
         if show_double_initial:
-#            ax.axhline(2 * initial_value, color='red', linestyle='--', linewidth=1, label='2x Initial Value')
             ax.plot(x_axis, np.full(len(x_axis), 2 * initial_value), color='red', linestyle='--', linewidth=1, label='2x Initial Value')
 
         # Determine compounding intervals per year based on frequency
@@ -917,16 +912,23 @@ with tab1:
         ax.text(x_last, p95[-1], f"95th: {p95[-1]:,.0f}", color="lightblue",
                 fontsize=label_fontsize, va="center", ha="left", alpha=0.9)
 
-
-        
         ax.set_title("Portfolio Value Over Time")
         ax.set_xlabel("Date")
-        ax.set_ylabel("Portfolio Value")
+        # ax.set_ylabel("Portfolio Value")  #v4.12
+        ax.set_ylabel("Portfolio Value (log scale)" if use_log_scale else "Portfolio Value")
+        
         ax.legend()
         ax.grid(True)
         plt.xticks(rotation=45)
 
         #ax.set_ylim(0, 20000)    # Forces th Y axis: Sets min=0, max=5000, # to delete later when no longer needed
+
+
+        if use_log_scale:
+            # ensure a positive bottom margin on log axes
+            y_min = max(1e-6, min(p05.min(), p25.min(), median_path.min()))
+            ax.set_ylim(bottom=y_min * 0.9)
+
         
         st.pyplot(fig)
 
@@ -976,13 +978,27 @@ with tab1:
                 key="download_percentile_paths"
             )
         with right_button:
-            st.download_button(
-                label="Download Simulation Paths (CSV)",
-                data=pd.DataFrame(portfolio_paths, index=x_axis).to_csv().encode('utf-8'),
-                file_name='simulated_paths.csv', key="download_path_2",
-                mime='text/csv'
+            # Build a tidy DataFrame for Excel (columns = simulations, index = dates)
+            paths_df = pd.DataFrame(
+                portfolio_paths,
+                index=x_axis,
+                columns=[f"Sim_{i+1}" for i in range(portfolio_paths.shape[1])]
             )
+            paths_df.index.name = "Date"
 
+            # Write to XLSX in-memory
+            paths_xlsx = BytesIO()
+            with pd.ExcelWriter(paths_xlsx, engine="xlsxwriter") as writer:
+                paths_df.to_excel(writer, sheet_name="Simulation Paths", index=True)
+
+            paths_xlsx.seek(0)
+            st.download_button(
+                label="Download Simulation Paths (Excel)",
+                data=paths_xlsx,
+                file_name="simulated_paths.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_paths_xlsx"
+            )
 
 with tab2:
     if not has_data:
@@ -1011,7 +1027,6 @@ with tab2:
 
             fig_hist, ax_hist = plt.subplots(figsize=(5, 4))
             final_values = portfolio_paths[-1]
- #           ax_hist.hist(final_values, bins=50, color='skyblue', edgecolor='black')
 
             # Calculate 1st and 99th percentiles to limit x-axis range
             x_min, x_max = np.percentile(final_values, [1, 99])
@@ -1023,7 +1038,6 @@ with tab2:
             ax_hist.set_title("Distribution of Final Portfolio Values")
             ax_hist.set_xlabel("Final Value")
             ax_hist.set_ylabel("Frequency")
-       #    st.pyplot(fig_hist)
 
             # Download button for Final Value distribution
             hist_buf = BytesIO()
@@ -1107,15 +1121,12 @@ with tab3:
                 var_threshold = np.percentile(var_values, 100 - var_confidence)
                 fig_var, ax_var = plt.subplots(figsize=(5, 4))
 
- #               ax_var.hist(var_values, bins=50, color='lightgrey', edgecolor='black')
-
                 # Compute reasonable axis limits using percentiles
                 x_min, x_max = np.percentile(var_values, [1, 99])
                 # Plot histogram within these bounds
                 ax_var.hist(var_values, bins=50, range=(x_min/2, x_max*1.5), color='lightgrey', edgecolor='black')
                 # Explicitly set x-axis limits
                 ax_var.set_xlim(x_min/2, x_max*1.5)
-
 
                 ax_var.axvline(var_threshold, color='red', linestyle='--', label=f'{var_confidence}% VaR = {var_threshold:,.2f}')
                 ax_var.set_title(f"{var_confidence}% VaR at Year {var_years}")
@@ -1196,7 +1207,7 @@ with tab4:
                 # found a deeper max drawdown → reset recovery to NaN and search ahead
                 if dd > max_dd:
                     max_dd = dd
-                    rec_time_for_max = np.nan  # IMPORTANT: reset so we don’t carry over a prior recovery
+                    rec_time_for_max = np.nan  # Reset so we don’t carry over a prior recovery
 
                     # look forward for recovery to that peak before end of series
                     for j in range(i + 1, len(path)):
