@@ -427,7 +427,8 @@ else:
     ltcma_return = st.data_editor(
         base_ltcma,
         num_rows="dynamic",
-        use_container_width=True,  # legacy API
+        # use_container_width=True,  # legacy API
+        width="stretch",        # new API
         key="ltcma_widget",
     )
 
@@ -507,7 +508,8 @@ if _supports_width_string():
 else:
     corr_return = st.data_editor(
         corr_base,
-        use_container_width=True,
+        #use_container_width=True,
+        width="stretch",
         column_config=float_config,
         key="corr_widget",
     )
@@ -1328,5 +1330,6 @@ with tab4:
                     key="download_drawdown_excel"
                 )
             
+
 
 
