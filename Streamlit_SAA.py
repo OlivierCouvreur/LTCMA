@@ -109,7 +109,7 @@ import pickle
 import base64
 
 
-APP_VERSION = "v4.12.1"
+APP_VERSION = "v4.12.3"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -410,10 +410,11 @@ for c in ["Exp Return", "Exp Volatility", "SAA", "Min", "Max"]:
 ltcma_return = st.data_editor(
     base_ltcma,
     num_rows="dynamic",
-    use_container_width=True,  # TODO for Web (Streamlit new API): replace with width="stretch"
-    #width="stretch",         # new API
+    #use_container_width=True,  # TODO for Web after 31/12/2025 (Streamlit new API): replace with width="stretch"
+    width="stretch",         # new API
     key="ltcma_widget"
 )
+
 
 # Light hygiene on a copy for calculations ONLY (don’t write back to widget)
 ltcma_df = ltcma_return.copy()
@@ -480,8 +481,8 @@ float_config = {
 # Render the editor (never write to this key in code)
 corr_return = st.data_editor(
     corr_base,
-    use_container_width=True,  # TODO(Streamlit new API): replace with width="stretch"
-    #width="stretch"           # for Web version
+    #use_container_width=True,  # TODO(Streamlit new API): replace with width="stretch"
+    width="stretch",         # new API
     column_config=float_config,
     key="corr_widget"
 )
@@ -1302,6 +1303,5 @@ with tab4:
                     key="download_drawdown_excel"
                 )
             
-
 
 
