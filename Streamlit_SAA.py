@@ -70,6 +70,9 @@ v4.x
 - Toggle the Y axis for simulations between Linear and Log ?  -- DONE v4.12.0
 
 v5.x
+- move some charts from Matplotlib to Plotly, to get better interactions for users
+        Simulation chart: DONE
+        
 - incorporate the historical simulation part, meaning we need an interface to upload historical returns
     this means finding a way to circumvent / or defining what to do when data is missing
 - potentially, change the interface to allow two portfolio comparison, sort of before/after
@@ -109,7 +112,7 @@ import pickle
 import base64
 
 
-APP_VERSION = "v4.12.3"
+APP_VERSION = "v5.1.1"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -136,11 +139,19 @@ def ensure_corr_shape(assets: pd.Index, corr_df: pd.DataFrame | None) -> pd.Data
 st.set_page_config(layout="wide")
 st.title("SAA Portfolio Monte Carlo Simulator")
 
+
+def _invalidate_sim():
+    for k in ("portfolio_paths", "x_axis", "fig_hist", "buf_hist", "fig_var", "buf_var",
+              "fig_ddist", "buf_ddist"):
+        st.session_state.pop(k, None)
+    st.session_state.simulation_has_run = False
+
+
 # Sidebar Inputs
 
 # Initialize default session state
 default_values = {
-    "start_date": pd.to_datetime("2025-01-01"),
+    "start_date": pd.to_datetime("2024-12-31"),
     "n_years": 10,
     "initial_value": 100.0,
     "frequency": "monthly",
@@ -301,24 +312,40 @@ with st.sidebar.expander("Session Management"):
             st.stop()
 
 # UI Widgets using st.session_state
-start_date = st.sidebar.date_input("Start Date", value=st.session_state["start_date"], key="start_date")
-n_years = st.sidebar.slider("Investment Horizon (Years)", 1, 30, st.session_state["n_years"], key="n_years")
-frequency = st.sidebar.selectbox(
-    "Frequency", ["monthly", "quarterly", "yearly"],
-    index=["monthly", "quarterly", "yearly"].index(st.session_state["frequency"]),
-    key="frequency"
+
+start_date = st.sidebar.date_input(
+    "Start Date",
+    value=st.session_state["start_date"],
+    key="start_date",
+    on_change=_invalidate_sim,        # <- NEW  v5.1
 )
+
+n_years = st.sidebar.slider(
+    "Investment Horizon (Years)",
+    1, 30,
+    st.session_state["n_years"],
+    key="n_years",
+    on_change=_invalidate_sim,        # <- NEW  v5.1
+)
+
+frequency = st.sidebar.selectbox(
+    "Frequency",
+    ["monthly", "quarterly", "yearly"],
+    index=["monthly", "quarterly", "yearly"].index(st.session_state["frequency"]),
+    key="frequency",
+    on_change=_invalidate_sim,        # <- NEW v5.1
+)
+
 initial_value = st.sidebar.number_input("Initial Portfolio Value", value=st.session_state["initial_value"], key="initial_value")
 n_sims = st.sidebar.slider("Number of Simulations", 100, 5000, st.session_state["n_sims"], step=100, key="n_sims")
 
 
 with st.sidebar.expander("Optional Display Settings"):
-    n_paths_to_plot = st.slider("Paths to Display", 0, 50, 0)
-    n_extreme_paths = st.slider("Extreme Paths (for Avg)", 0, 10, 0)
+    use_log_scale = st.checkbox("Log scale (Y axis)", value=False)
     show_double_initial = st.checkbox("Show Double Initial Value", value=False)
     show_double_with_inflation = st.checkbox("Show Double with Inflation", value=False)
     inflation_rate = st.number_input("Inflation Rate (for compounding)", value=0.025, step=0.001, format="%.3f")
-    use_log_scale = st.checkbox("Log scale (Y axis)", value=False)
+    
     
 with st.sidebar.expander("Value at Risk (VaR) Settings"):
     var_years = st.slider("VaR Horizon (Years)", 1, 10, 1)
@@ -659,6 +686,7 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
         expected_portfolio_volatility = np.sqrt(weights_to_use.T @ cov @ weights_to_use)
 
         steps_per_year = {"monthly": 12, "quarterly": 4, "yearly": 1}[frequency]
+       
         n_steps = n_years * steps_per_year
         dt = 1 / steps_per_year
 
@@ -845,103 +873,177 @@ has_data = (
 #v4.4 ------------------------------
 
 
-
 with tab1:
     if not has_data:
         st.info("Run a simulation to see the chart.")
     else:
+        from plotly import graph_objects as go
+
         portfolio_paths = st.session_state["portfolio_paths"]
         x_axis = st.session_state["x_axis"]
 
+        # Percentiles
         p25 = np.percentile(portfolio_paths, 25, axis=1)
         p75 = np.percentile(portfolio_paths, 75, axis=1)
         p05 = np.percentile(portfolio_paths, 5, axis=1)
         p95 = np.percentile(portfolio_paths, 95, axis=1)
         median_path = np.median(portfolio_paths, axis=1)
 
-        fig, ax = plt.subplots(figsize=(10, 6))
-
-        # v4.12: switch to log scale if requested
-        if use_log_scale:
-            ax.set_yscale("log")
-
-        if n_paths_to_plot > 0:
-            for idx in np.random.choice(portfolio_paths.shape[1], n_paths_to_plot, replace=False):
-                color = np.random.rand(3,)  # random RGB
-                ax.plot(x_axis, portfolio_paths[:, idx], color=color, linewidth=0.5, alpha=0.4)
-
-        if n_extreme_paths > 0:
-            final_values = portfolio_paths[-1]
-            best_idx = np.argsort(final_values)[-n_extreme_paths:]
-            worst_idx = np.argsort(final_values)[:n_extreme_paths]
-
-            ax.plot(x_axis, np.mean(portfolio_paths[:, best_idx], axis=1), color='green', label='Avg Best')
-            ax.plot(x_axis, np.mean(portfolio_paths[:, worst_idx], axis=1), color='red', label='Avg Worst')
-
-        if show_double_initial:
-            ax.plot(x_axis, np.full(len(x_axis), 2 * initial_value), color='red', linestyle='--', linewidth=1, label='2x Initial Value')
-
-        # Determine compounding intervals per year based on frequency
+        # Targets
         periods_per_year = {"monthly": 12, "quarterly": 4, "yearly": 1}[frequency]
-
-        # Total number of steps in the simulation
         n_steps = len(x_axis)
-
-        # Compute compounded inflation-adjusted target: 2x initial, compounded
-        growth_factor = (1 + inflation_rate / periods_per_year) ** np.arange(n_steps)
-        compounded_double = initial_value * 2 * growth_factor
-
-        if show_double_with_inflation:
-            ax.plot(x_axis, compounded_double, color='darkorange', linestyle='--', linewidth=1, label='Inflation-Adj. 2x Target')
-    
-        ax.plot(x_axis, median_path, color='blue', label='Median')
-        ax.fill_between(x_axis, p05, p95, color='lightblue', alpha=0.3, label='5–95%')
-        ax.fill_between(x_axis, p25, p75, color='blue', alpha=0.2, label='25–75%')
-
-
-        # Add labels at the end of percentile lines
-        label_fontsize = 8
-        x_last = x_axis[-1]+ pd.Timedelta(days=15)
-
-        ax.text(x_last, median_path[-1], f"Median: {median_path[-1]:,.0f}", color="blue",
-                fontsize=label_fontsize, va="center", ha="left")
-
-        ax.text(x_last, p25[-1], f"25th: {p25[-1]:,.0f}", color="blue",
-                fontsize=label_fontsize, va="center", ha="left", alpha=0.7)
-
-        ax.text(x_last, p75[-1], f"75th: {p75[-1]:,.0f}", color="blue",
-                fontsize=label_fontsize, va="center", ha="left", alpha=0.7)
-
-        ax.text(x_last, p05[-1], f"5th: {p05[-1]:,.0f}", color="lightblue",
-                fontsize=label_fontsize, va="center", ha="left", alpha=0.9)
-
-        ax.text(x_last, p95[-1], f"95th: {p95[-1]:,.0f}", color="lightblue",
-                fontsize=label_fontsize, va="center", ha="left", alpha=0.9)
-
-        ax.set_title("Portfolio Value Over Time")
-        ax.set_xlabel("Date")
-        # ax.set_ylabel("Portfolio Value")  #v4.12
-        ax.set_ylabel("Portfolio Value (log scale)" if use_log_scale else "Portfolio Value")
+        two_x_line = np.full(n_steps, 2 * initial_value, dtype=float)
         
-        ax.legend()
-        ax.grid(True)
-        plt.xticks(rotation=45)
+        # Compound by elapsed YEARS along the x-axis
+        years_elapsed = np.arange(n_steps) / periods_per_year
+        compounded_double = 2.0 * initial_value * (1.0 + inflation_rate) ** years_elapsed
 
-        #ax.set_ylim(0, 20000)    # Forces th Y axis: Sets min=0, max=5000, # to delete later when no longer needed
 
+        # --- helpers for log scale ---
+        def _positives(a: np.ndarray) -> np.ndarray:
+            a = np.asarray(a, float)
+            a[~np.isfinite(a)] = np.nan
+            a[a <= 0] = np.nan
+            return a
 
         if use_log_scale:
-            # ensure a positive bottom margin on log axes
-            y_min = max(1e-6, min(p05.min(), p25.min(), median_path.min()))
-            ax.set_ylim(bottom=y_min * 0.9)
+            p05s = _positives(p05)
+            p25s = _positives(p25)
+            p50s = _positives(median_path)
+            p75s = _positives(p75)
+            p95s = _positives(p95)
+            tgt_2x = _positives(two_x_line) if show_double_initial else None
+            tgt_inf = _positives(compounded_double) if show_double_with_inflation else None
+        else:
+            p05s, p25s, p50s, p75s, p95s = p05, p25, median_path, p75, p95
+            tgt_2x = two_x_line if show_double_initial else None
+            tgt_inf = compounded_double if show_double_with_inflation else None
 
+        fig = go.Figure()
+
+        # Wide band (5–95)
+        fig.add_trace(go.Scatter(
+            x=x_axis, y=p95s, name="95th percentile",
+            mode="lines", line=dict(width=1),
+            hovertemplate="95th: %{y:,.0f}<extra></extra>"
+        ))
+        fig.add_trace(go.Scatter(
+            x=x_axis, y=p05s, name="5th percentile",
+            mode="lines", line=dict(width=1),
+            fill="tonexty", fillcolor="rgba(100,149,237,0.15)",
+            hovertemplate="5th: %{y:,.0f}<extra></extra>"
+        ))
+
+        # Narrow band (25–75)
+        fig.add_trace(go.Scatter(
+            x=x_axis, y=p75s, name="75th percentile",
+            mode="lines", line=dict(width=1),
+            hovertemplate="75th: %{y:,.0f}<extra></extra>"
+        ))
+        fig.add_trace(go.Scatter(
+            x=x_axis, y=p25s, name="25th percentile",
+            mode="lines", line=dict(width=1),
+            fill="tonexty", fillcolor="rgba(100,149,237,0.30)",
+            hovertemplate="25th: %{y:,.0f}<extra></extra>"
+        ))
+
+        # Median
+        fig.add_trace(go.Scatter(
+            x=x_axis, y=p50s, name="Median (50th)",
+            mode="lines", line=dict(width=2, color="black"),
+            hovertemplate="Median: %{y:,.0f}<extra></extra>"
+        ))
+
+        # Optional targets
+        if tgt_2x is not None:
+            fig.add_trace(go.Scatter(
+                x=x_axis, y=tgt_2x, name="2x Initial Value",
+                mode="lines", line=dict(dash="dash"),
+                hovertemplate="%{y:,.0f}<extra></extra>"
+            ))
+        if tgt_inf is not None:
+            fig.add_trace(go.Scatter(
+                x=x_axis, y=tgt_inf, name="Inflation-Adj. 2x Target",
+                mode="lines", line=dict(dash="dot"),
+                hovertemplate="%{y:,.0f}<extra></extra>"
+            ))
+
+        # Layout + axis handling
+        fig.update_layout(
+            title="Portfolio Value Over Time",
+            hovermode="x",   # was "x unified",
+            margin=dict(l=40, r=80, t=40, b=40),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+        )
+        fig.update_xaxes(title="Date")
+
+        fig.update_layout(hoverdistance=30, spikedistance=-1)
+        fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor")
+        #fig.update_yaxes(showspikes=True)
+
+        if use_log_scale:
+            # Clamp log axis to real data range to avoid the crazy auto scale.
+            series = [p05s, p25s, p50s, p75s, p95s]
+            if tgt_2x is not None:
+                series.append(tgt_2x)
+            if tgt_inf is not None:
+                series.append(tgt_inf)
+            flat = np.concatenate([s[np.isfinite(s)] for s in series if s is not None])
+            ymin = max(1e-6, float(np.nanmin(flat)))
+            ymax = float(np.nanmax(flat))
+            fig.update_yaxes(
+                type="log",
+                title="Portfolio Value (log scale)",
+                range=[np.log10(ymin * 0.95), np.log10(ymax * 1.05)],
+                tickformat="~s"
+            )
+        else:
+            fig.update_yaxes(title="Portfolio Value")
+
+        # End-of-series value-only labels
+        x_last = x_axis[-1]
+        def annotate_val(y):
+            if y is not None and np.isfinite(y[-1]):
+                fig.add_annotation(
+                    x=x_last, y=y[-1], text=f"{y[-1]:,.0f}",
+                    showarrow=False, xanchor="left", yanchor="middle", xshift=8, font=dict(size=10)
+                )
+        for arr in (p95s, p75s, p50s, p25s, p05s):
+            annotate_val(arr)
+
+
+        plot_config = {
+            "displaylogo": False,
+            "toImageButtonOptions": {
+                "format": "png",        # or "svg"
+                "filename": "simulation_plot",
+                "height": 600,
+                "width": 1200,
+                "scale": 2              # 2x DPI
+            }
+        }
+
+        # Title/legend spacing
+        fig.update_layout(
+            height=700,         # height of the chart  v5.1 test different version...
+            margin=dict(t=20),  # more room at the top
+            title=dict(
+                text="Portfolio Value Over Time",
+                x=0.5, xanchor="center",
+                y=0.99, yanchor="top",
+                pad=dict(b=6)      # a little space under the title
+            ),
+            legend=dict(
+                orientation="h",
+                x=0.5, xanchor="center",
+                y=0.96, yanchor="top"   # place legend just under the title
+            ),
+        )
         
-        st.pyplot(fig)
+        st.plotly_chart(fig, use_container_width=True, config=plot_config)
 
-        buf = BytesIO()
-        fig.savefig(buf, format="png")
-
-
+        # ----- downloads -----
+        # Percentile export
         percentile_df = pd.DataFrame({
             "5th Percentile": p05,
             "25th Percentile": p25,
@@ -949,62 +1051,55 @@ with tab1:
             "75th Percentile": p75,
             "95th Percentile": p95
         }, index=x_axis)
-
         percentile_df.index.name = "Date"
-        
+
         if show_double_initial:
             percentile_df["2x Initial Value"] = 2 * initial_value
-
         if show_double_with_inflation:
             percentile_df["Inflation-Adj. 2x Target"] = compounded_double
 
-        # Write to Excel in memory
-        excel_buf = BytesIO()
-        with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
+        # Build Simulation Paths (Excel)
+        paths_df = pd.DataFrame(
+            portfolio_paths,
+            index=x_axis,
+            columns=[f"Sim_{i+1}" for i in range(portfolio_paths.shape[1])]
+        )
+        paths_df.index.name = "Date"
+
+        # Excel buffers
+        perc_xlsx = BytesIO()
+        with pd.ExcelWriter(perc_xlsx, engine="xlsxwriter") as writer:
             percentile_df.to_excel(writer, sheet_name="Percentile Paths")
+        perc_xlsx.seek(0)
 
-        excel_buf.seek(0)
+        paths_xlsx = BytesIO()
+        with pd.ExcelWriter(paths_xlsx, engine="xlsxwriter") as writer:
+            paths_df.to_excel(writer, sheet_name="Simulation Paths", index=True)
+        paths_xlsx.seek(0)
 
 
-        left_button, middle_button, right_button = st.columns([1, 1, 1])
-
-        with left_button:
-            st.download_button(
-                label="Download Plot as PNG",
-                data=buf.getvalue(),
-                file_name="simulation_plot.png",
-                mime="image/png"
-            )
+        middle_button, right_button = st.columns([1, 1])
         with middle_button:
             st.download_button(
-                label="Download Percentile Paths (Excel)",
-                data=excel_buf,
+                "Download Percentile Paths (Excel)",
+                data=perc_xlsx,
                 file_name="percentile_paths.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="download_percentile_paths"
             )
         with right_button:
-            # Build a tidy DataFrame for Excel (columns = simulations, index = dates)
-            paths_df = pd.DataFrame(
-                portfolio_paths,
-                index=x_axis,
-                columns=[f"Sim_{i+1}" for i in range(portfolio_paths.shape[1])]
-            )
-            paths_df.index.name = "Date"
-
-            # Write to XLSX in-memory
-            paths_xlsx = BytesIO()
-            with pd.ExcelWriter(paths_xlsx, engine="xlsxwriter") as writer:
-                paths_df.to_excel(writer, sheet_name="Simulation Paths", index=True)
-
-            paths_xlsx.seek(0)
             st.download_button(
-                label="Download Simulation Paths (Excel)",
+                "Download Simulation Paths (Excel)",
                 data=paths_xlsx,
                 file_name="simulated_paths.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="download_paths_xlsx"
             )
+
+
+
+
+
 
 with tab2:
     if not has_data:
