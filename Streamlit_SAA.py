@@ -1025,7 +1025,7 @@ with tab1:
 
         # Title/legend spacing
         fig.update_layout(
-            height=700,         # height of the chart  v5.1 test different version...
+           # height=700,         # height of the chart  v5.1 test different version...
             margin=dict(t=20),  # more room at the top
             title=dict(
                 text="Portfolio Value Over Time",
@@ -1398,5 +1398,6 @@ with tab4:
                     key="download_drawdown_excel"
                 )
             
+
 
 
