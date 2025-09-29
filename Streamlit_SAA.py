@@ -72,6 +72,7 @@ v4.x
 v5.x
 - move some charts from Matplotlib to Plotly, to get better interactions for users
         Simulation chart: DONE
+        v5.2 makes it optional, with a toggle between the Matplotlib and the Plotly version
         
 - incorporate the historical simulation part, meaning we need an interface to upload historical returns
     this means finding a way to circumvent / or defining what to do when data is missing
@@ -84,6 +85,8 @@ v5.x
         set a target, define if static or linked to inflate, and give options to *2, *3, *X, Set Value
         maybe even give a timeline, like a big upcoming Cash Flow, to get back the proba to achieve it
         maybe, in optimizer, set this as a strict constraint (i need to reach this by then, with certainty / (or X% proba?) )
+
+-v5.3: Add a password
 
 
 Author:
@@ -112,7 +115,7 @@ import pickle
 import base64
 
 
-APP_VERSION = "v5.2.0"
+APP_VERSION = "v5.3.0"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -138,6 +141,28 @@ def ensure_corr_shape(assets: pd.Index, corr_df: pd.DataFrame | None) -> pd.Data
 
 st.set_page_config(layout="wide")
 st.title("SAA Portfolio Monte Carlo Simulator")
+
+#v5.3
+# ----- SIMPLE PASSWORD GATE -----
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.subheader("Restricted access")
+    pwd = st.text_input("Enter password", type="password")
+    ok = st.button("Enter")
+
+    if ok:
+        if pwd == st.secrets["auth"]["password"]:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Incorrect password")
+
+    st.stop()  # block the rest of the app until authenticated
+# ----- END PASSWORD GATE -----
+#v5.3
+
 
 
 def _invalidate_sim():
