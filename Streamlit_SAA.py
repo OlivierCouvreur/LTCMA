@@ -87,6 +87,7 @@ v5.x
         maybe, in optimizer, set this as a strict constraint (i need to reach this by then, with certainty / (or X% proba?) )
 
 -v5.3: Add a password
+-v5.4: Add a Username/password with hashed value for stronger security
 
 
 Author:
@@ -113,21 +114,16 @@ from scipy.stats import t
 from pathlib import Path  # For safer file suffix handling
 import pickle
 import base64
+import hashlib, hmac, binascii  # v5.4
 
 
-APP_VERSION = "v5.3.0"
+APP_VERSION = "v5.4.0"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
 DEFAULT_CORR_PATH = "Data/Correlation Matrix.xlsx"
 DEFAULT_SCENARIO_PATH = "Data/Scenarios.xlsx"
 
-
-
-# Helper to detect DataFrame changes
-#def df_hash(df: pd.DataFrame) -> int:
-#    """Return an integer hash for a DataFrame."""
-#    return int(pd.util.hash_pandas_object(df, index=True).sum())
 
 # Ensure the correlation matrix has the proper shape
 def ensure_corr_shape(assets: pd.Index, corr_df: pd.DataFrame | None) -> pd.DataFrame:
@@ -142,26 +138,88 @@ def ensure_corr_shape(assets: pd.Index, corr_df: pd.DataFrame | None) -> pd.Data
 st.set_page_config(layout="wide")
 st.title("SAA Portfolio Monte Carlo Simulator")
 
-#v5.3
-# ----- SIMPLE PASSWORD GATE -----
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
 
-if not st.session_state.authenticated:
-    st.subheader("Restricted access")
-    pwd = st.text_input("Enter password", type="password")
-    ok = st.button("Enter")
+#v5.4  Users/Password
+from collections.abc import Mapping
 
-    if ok:
-        if pwd == st.secrets["auth"]["password"]:
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("Incorrect password")
+def get_user_record(username: str):
+    auth = st.secrets.get("auth", {})
+    users_raw = auth.get("users", {})
+    # Coerce to a plain dict if possible; otherwise accept any Mapping
+    if isinstance(users_raw, Mapping):
+        users = dict(users_raw)
+    else:
+        users = users_raw  # last resort; still try to use it
+    uname = (username or "").strip().lower()
+    return users.get(uname)
 
-    st.stop()  # block the rest of the app until authenticated
-# ----- END PASSWORD GATE -----
-#v5.3
+def verify_password_pbkdf2(username: str, password: str) -> bool:
+    rec = get_user_record(username)
+    if not rec:
+        st.warning("User not found.")
+        return False
+    try:
+        salt_hex = rec["salt"].strip()
+        hash_hex = rec["hash"].strip().lower()
+        iterations = int(rec.get("iterations", 150_000))
+        # sanity checks
+        if len(salt_hex) % 2 != 0 or len(hash_hex) != 64:
+            st.error("Secrets format looks off (salt must be hex; hash must be 64-char hex for sha256).")
+            return False
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(hash_hex)
+        dk = hashlib.pbkdf2_hmac("sha256", (password or "").encode("utf-8"), salt, iterations)
+        return hmac.compare_digest(dk, expected)
+    except KeyError as e:
+        st.error(f"Missing field in secrets: {e}")
+        return False
+    except binascii.Error:
+        st.error("Salt/hash are not valid hex. Regenerate them.")
+        return False
+    except Exception as e:
+        st.error(f"Auth error: {e}")
+        return False
+
+# ---- Auth gate (multi-user, hashed) ----
+AUTH_REQUIRED = bool(st.secrets.get("auth", {}).get("require", False))
+
+if AUTH_REQUIRED:
+    if "auth" not in st.session_state:
+        st.session_state.auth = {"ok": False, "user": None, "role": None}
+
+    if not st.session_state.auth["ok"]:
+        st.subheader("Restricted access")
+        colU, colP = st.columns([1, 1])
+        with colU:
+            username = st.text_input("Username").strip().lower()
+        with colP:
+            password = st.text_input("Password", type="password")
+
+        btn = st.button("Sign in")
+        if btn:
+            if verify_password_pbkdf2(username, password):
+                rec = get_user_record(username)
+                st.session_state.auth = {"ok": True, "user": username, "role": rec.get("role", "user")}
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
+        st.stop()  # Block the rest of the app until signed in
+
+    # Signed in → small status + sign out in sidebar
+    st.sidebar.success(f"Signed in as {st.session_state.auth['user']} ({st.session_state.auth['role']})")
+    if st.sidebar.button("Sign out"):
+        st.session_state.pop("auth", None)
+        st.rerun()
+# ---- End Auth gate ----
+
+ROLE = (st.session_state.auth["role"] if AUTH_REQUIRED else "admin")
+CAN_OPTIMIZE = (ROLE in ("admin", "analyst"))
+
+st.sidebar.caption(f"Role: **{st.session_state.auth['role']}**")
+
+
+#v5.4  Users/Password
+
 
 
 
