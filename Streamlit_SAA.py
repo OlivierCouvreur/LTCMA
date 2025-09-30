@@ -88,7 +88,7 @@ v5.x
 
 -v5.3: Add a password
 -v5.4: Add a Username/password with hashed value for stronger security
-
+-v6 new user interface for board members
 
 Author:
 -------
@@ -115,9 +115,10 @@ from pathlib import Path  # For safer file suffix handling
 import pickle
 import base64
 import hashlib, hmac, binascii  # v5.4
+from base64 import b64encode
 
 
-APP_VERSION = "v5.4.0"
+APP_VERSION = "v6.2.5"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -134,9 +135,118 @@ def ensure_corr_shape(assets: pd.Index, corr_df: pd.DataFrame | None) -> pd.Data
     np.fill_diagonal(out.values, 1.0)
     return out
 
+def require_cap(flag: str):
+    if not cap.get(flag, False):
+        st.warning("You don’t have permission to perform this action.")
+        st.stop()
 
+        
 st.set_page_config(layout="wide")
-st.title("SAA Portfolio Monte Carlo Simulator")
+st.title("Portfolio Analytics")
+
+# v6.0 Helpers for images   BEGIN
+# ===== Viewer portal helpers =====
+
+def load_image_b64(path: str) -> str:
+    try:
+        with open(path, "rb") as f:
+            return b64encode(f.read()).decode()
+    except Exception:
+        # fallback tiny transparent pixel if image missing
+        return "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+
+def image_tile(label: str, img_path: str, target_view: str, height_px: int = 220):
+    """
+    Renders a clickable 'tile' that navigates with ?view=<target_view>.
+    """
+    img_b64 = load_image_b64(img_path)
+    st.markdown(
+        f"""
+        <a href="?view={target_view}" style="text-decoration:none;">
+          <div style="
+              position:relative;
+              width:100%;
+              height:{height_px}px;
+              border-radius:16px;
+              overflow:hidden;
+              box-shadow:0 6px 18px rgba(0,0,0,.15);
+              background-image:url('data:image/png;base64,{img_b64}');
+              background-size:cover;
+              background-position:center;
+              filter:saturate(1.02);
+          ">
+            <div style="
+                position:absolute; left:0; right:0; bottom:0;
+                padding:12px 16px;
+                background:linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,.55) 70%);
+                color:white; font-weight:700; font-size:1.05rem; letter-spacing:.2px;
+            ">
+              {label}
+            </div>
+          </div>
+        </a>
+        """,
+        unsafe_allow_html=True
+    )
+
+def get_view_param(default: str = "home") -> str:
+    # Streamlit >= 1.31 has st.query_params, older: st.experimental_get_query_params
+    try:
+        v = st.query_params.get("view", default)
+        # st.query_params returns str in new versions
+        if isinstance(v, list) and v:
+            return v[0]
+        return v or default
+    except Exception:
+        qp = st.experimental_get_query_params()
+        return (qp.get("view", [default]) or [default])[0]
+
+def set_view_param(view: str):
+    try:
+        st.query_params["view"] = view
+    except Exception:
+        st.experimental_set_query_params(view=view)
+
+def viewer_back_link():
+    st.link_button("◀ Back to menu", "?view=home")
+
+
+def render_logo_top_right(img_path: str, height_px: int = 42):
+    """
+    Fixed, non-clickable logo in the top-right corner.
+    """
+    img_b64 = load_image_b64(img_path)
+    st.markdown(
+        f"""
+        <div style="
+            position: fixed;
+            top: 70px;
+            right: 180px;
+            z-index: 1000;
+        ">
+            <img
+                src="data:image/png;base64,{img_b64}"
+                alt="Logo"
+                draggable="false"
+                style="
+                    height: {height_px}px;
+                    display: block;
+                    border-radius: 6px;
+                    box-shadow: 0 2px 8px rgba(0,0,0,.18);
+                    user-select: none;
+                    pointer-events: none; /* <- ignores clicks */
+                "
+            />
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# v6.0 Helpers for images   END
+
+
+
 
 
 #v5.4  Users/Password
@@ -213,14 +323,22 @@ if AUTH_REQUIRED:
 # ---- End Auth gate ----
 
 ROLE = (st.session_state.auth["role"] if AUTH_REQUIRED else "admin")
-CAN_OPTIMIZE = (ROLE in ("admin", "analyst"))
 
-st.sidebar.caption(f"Role: **{st.session_state.auth['role']}**")
+CAPS = {
+    "admin":   {"edit_ltcma": True,  "optimize": True,  "scenarios": True,  "downloads": True},
+    "analyst": {"edit_ltcma": True,  "optimize": True,  "scenarios": True,  "downloads": True},
+    "viewer":  {"edit_ltcma": False, "optimize": False, "scenarios": True,  "downloads": False},
+}
+cap = CAPS.get(ROLE, CAPS["viewer"])
+
+# st.sidebar.caption(f"Role: **{st.session_state.auth['role']}**")
 
 
 #v5.4  Users/Password
 
 
+#v6.2 LOGO
+render_logo_top_right("Data/Logo.png", height_px=150)
 
 
 def _invalidate_sim():
@@ -496,6 +614,8 @@ st.sidebar.markdown(
 )
 
 
+
+
 # --- LTCMA (live editor, no Apply) ---
 
 DEFAULT_LTCMA = pd.DataFrame({
@@ -506,141 +626,193 @@ DEFAULT_LTCMA = pd.DataFrame({
     "Max": [1.0, 1.0, 1.0]
 }, index=["Equities", "Bonds", "Alternatives"])
 
-st.subheader("LTCMA Table")
-uploaded_ltcma = st.file_uploader("Upload LTCMA File", type=["xls", "xlsx"], key="ltcma_upload", label_visibility="collapsed")
 
-# Base table to show in the widget
-if uploaded_ltcma is not None:
-    base_ltcma = pd.read_excel(uploaded_ltcma, index_col=0)
-    # reset the widget state so the upload actually shows up
-    st.session_state.pop("ltcma_widget", None)
+
+
+
+
+
+#v6.2 NEW VERSION ADDITION   BEGIN
+
+# ===== LTCMA & CORRELATION — Admin editors, Viewer hidden =====
+# Assumes: ROLE, cap, DEFAULT_LTCMA, ensure_corr_shape, get_view_param already defined
+IS_VIEWER = (ROLE == "viewer")
+VIEW = get_view_param("home")  # so we can later detect ?view=stats if you want
+
+# --- LTCMA ---
+if not IS_VIEWER:
+    st.subheader("LTCMA Table")
+
+    uploaded_ltcma = st.file_uploader(
+        "Upload LTCMA File",
+        type=["xls", "xlsx"],
+        key="ltcma_upload",
+        label_visibility="collapsed",
+    )
+
+    # Base table for the editor
+    if uploaded_ltcma is not None:
+        base_ltcma = pd.read_excel(uploaded_ltcma, index_col=0)
+        # reset the widget state so the upload actually shows up
+        st.session_state.pop("ltcma_widget", None)
+    else:
+        # if the widget already has state, it will ignore this base
+        base_ltcma = st.session_state.get("ltcma_base_default", DEFAULT_LTCMA)
+
+    # numeric hygiene
+    for c in ["Exp Return", "Exp Volatility", "SAA", "Min", "Max"]:
+        if c in base_ltcma.columns:
+            base_ltcma[c] = pd.to_numeric(base_ltcma[c], errors="coerce").astype(float)
+
+    # live editor (admins/analysts can edit; viewers never see this editor)
+    ltcma_return = st.data_editor(
+        base_ltcma,
+        num_rows="dynamic",
+        width="stretch",
+        disabled=not cap["edit_ltcma"],
+        key="ltcma_widget",
+    )
+
+    # clean copy for calculations
+    ltcma_df = ltcma_return.copy()
 else:
-    # if the widget already has state, it will ignore this base
-    base_ltcma = st.session_state.get("ltcma_base_default", DEFAULT_LTCMA)
+    # VIEWER: no editor shown — use last known / default data, same cleaning
+    base_ltcma = st.session_state.get("ltcma_base_default", DEFAULT_LTCMA).copy()
+    for c in ["Exp Return", "Exp Volatility", "SAA", "Min", "Max"]:
+        if c in base_ltcma.columns:
+            base_ltcma[c] = pd.to_numeric(base_ltcma[c], errors="coerce").astype(float)
+    ltcma_df = base_ltcma
 
-# Set the format to float    v4.11
-for c in ["Exp Return", "Exp Volatility", "SAA", "Min", "Max"]:
-    if c in base_ltcma.columns:
-        base_ltcma[c] = pd.to_numeric(base_ltcma[c], errors="coerce").astype(float)
-
-# Render the editor. IMPORTANT: use the return value; do NOT read st.session_state["ltcma_widget"].
-
-ltcma_return = st.data_editor(
-    base_ltcma,
-    num_rows="dynamic",
-    #use_container_width=True,  # TODO for Web after 31/12/2025 (Streamlit new API): replace with width="stretch"
-    width="stretch",         # new API
-    key="ltcma_widget"
-)
-
-
-# Light hygiene on a copy for calculations ONLY (don’t write back to widget)
-ltcma_df = ltcma_return.copy()
-for c in ["Exp Return", "Exp Volatility", "SAA", "Min", "Max"]:
-    if c in ltcma_df.columns:
-        ltcma_df[c] = pd.to_numeric(ltcma_df[c], errors="coerce")
-
+# final LTCMA hygiene (shared)
 ltcma_df = ltcma_df.dropna(how="all")
 ltcma_df.index = ltcma_df.index.astype(str).str.strip()
 ltcma_df = ltcma_df.loc[ltcma_df.index != ""]
 
-# Change detection (no hashes). If table changed -> clear derived outputs
-prev_ltcma = st.session_state.get("prev_ltcma_df")
-if prev_ltcma is None or not ltcma_df.equals(prev_ltcma):
+# detect LTCMA changes → clear derived outputs
+_prev_ltcma = st.session_state.get("prev_ltcma_df")
+if _prev_ltcma is None or not ltcma_df.equals(_prev_ltcma):
     st.session_state["prev_ltcma_df"] = ltcma_df.copy()
     st.session_state.pop("portfolio_paths", None)
     st.session_state.pop("x_axis", None)
 
-# --- keep corr editor in lockstep with LTCMA assets ---
+# keep corr in lockstep with LTCMA assets
 new_assets = tuple(ltcma_df.index.tolist())
 prev_assets = st.session_state.get("corr_assets")
-
 if prev_assets is None or prev_assets != new_assets:
-    # realign stored corr to the new asset set and reset the editor widget
-    st.session_state["corr_store"] = ensure_corr_shape(ltcma_df.index, st.session_state.get("corr_store"))
+    st.session_state["corr_store"] = ensure_corr_shape(
+        ltcma_df.index, st.session_state.get("corr_store")
+    )
     st.session_state["corr_assets"] = new_assets
-    st.session_state.pop("corr_widget", None)  # forces the editor to rebuild with new rows/cols
+    st.session_state.pop("corr_widget", None)
 
-# --- Correlation Matrix (live editor, auto-align to LTCMA) ---
+# --- CORRELATION MATRIX ---
+if not IS_VIEWER:
+    hcol, bcol = st.columns([6, 1])
+    with hcol:
+        st.subheader("Correlation Matrix")
+    with bcol:
+        symm_click = st.button(
+            "↔ Symmetrize",
+            key="symmetrize_btn",
+            help="Set to (A + Aᵀ)/2, clip to [-1,1], diagonal=1",
+        )
 
-# Header + Symmetrize button on the right
-hcol, bcol = st.columns([6, 1])
-with hcol:
-    st.subheader("Correlation Matrix")
-with bcol:
-    symm_click = st.button(
-        "↔ Symmetrize",
-        key="symmetrize_btn",
-        help="Set to (A + Aᵀ)/2, clip to [-1,1], diagonal=1"
+    uploaded_corr = st.file_uploader(
+        "Upload Corr Matrix",
+        type=["xls", "xlsx"],
+        key="corr_upload",
+        label_visibility="collapsed",
     )
 
-uploaded_corr = st.file_uploader(
-    "Upload Corr Matrix", type=["xls", "xlsx"], key="corr_upload", label_visibility="collapsed"
-)
+    # load upload & reset widget to reflect it
+    if uploaded_corr is not None:
+        corr_store = pd.read_excel(uploaded_corr, index_col=0)
+        st.session_state["corr_store"] = corr_store.copy()
+        st.session_state.pop("corr_widget", None)
 
-# Keep a separate store for corr (NOT the widget key)
-corr_store: pd.DataFrame | None = st.session_state.get("corr_store")
+    corr_base = ensure_corr_shape(
+        ltcma_df.index, st.session_state.get("corr_store")
+    ).astype(float)
 
-# If user uploads, load + reset widget state so it shows
-if uploaded_corr is not None:
-    corr_store = pd.read_excel(uploaded_corr, index_col=0)
-    st.session_state["corr_store"] = corr_store.copy()
-    st.session_state.pop("corr_widget", None)
+    float_config = {
+        c: st.column_config.NumberColumn(
+            label=c, min_value=-1.0, max_value=1.0, step=0.01, format="%.2f"
+        )
+        for c in corr_base.columns
+    }
 
-# Always align to current LTCMA assets
-corr_base = ensure_corr_shape(ltcma_df.index, st.session_state.get("corr_store")).astype(float)
+    corr_return = st.data_editor(
+        corr_base,
+        width="stretch",
+        column_config=float_config,
+        disabled=not cap["edit_ltcma"],
+        key="corr_widget",
+    )
 
-# Build numeric column config for the editor
-float_config = {
-    c: st.column_config.NumberColumn(label=c, min_value=-1.0, max_value=1.0, step=0.01, format="%.2f")
-    for c in corr_base.columns
-}
+    # gentle hint if not symmetric
+    try:
+        if not np.allclose(
+            corr_return.values, corr_return.values.T, atol=1e-10, equal_nan=True
+        ):
+            st.info("Matrix isn’t symmetric. Click ↔ Symmetrize to fix.")
+    except Exception:
+        pass
 
-# Render the editor (never write to this key in code)
-corr_return = st.data_editor(
-    corr_base,
-    #use_container_width=True,  # TODO(Streamlit new API): replace with width="stretch"
-    width="stretch",         # new API
-    column_config=float_config,
-    key="corr_widget"
-)
+    if symm_click:
+        sym = (corr_return + corr_return.T) / 2.0
+        sym = sym.clip(-1.0, 1.0)
+        np.fill_diagonal(sym.values, 1.0)
+        st.session_state["corr_store"] = sym.copy()
+        st.session_state["prev_corr_df"] = sym.copy()
+        # clear dependents and rebuild
+        st.session_state.pop("portfolio_paths", None)
+        st.session_state.pop("x_axis", None)
+        st.session_state.pop("corr_widget", None)
+        st.rerun()
 
+    corr_matrix = corr_return.copy()
+else:
+    # VIEWER: no editor; use stored corr (or identity) aligned to LTCMA assets
+    corr_matrix = ensure_corr_shape(
+        ltcma_df.index, st.session_state.get("corr_store")
+    ).astype(float)
 
-
-# Gentle hint if the matrix isn't symmetric
-try:
-    if not np.allclose(corr_return.values, corr_return.values.T, atol=1e-10, equal_nan=True):
-        st.info("Matrix isn’t symmetric. Click ↔ Symmetrize to fix.")
-except Exception:
-    pass
-
-# If the button is clicked, symmetrize, persist, refresh editor, and clear derived outputs
-if symm_click:
-    sym = (corr_return + corr_return.T) / 2.0
-    sym = sym.clip(-1.0, 1.0)
-    np.fill_diagonal(sym.values, 1.0)
-
-    st.session_state["corr_store"] = sym.copy()
-    st.session_state["prev_corr_df"] = sym.copy()
-
-    # Clear dependent outputs and force the editor to rebuild with the symmetrized values
-    st.session_state.pop("portfolio_paths", None)
-    st.session_state.pop("x_axis", None)
-    st.session_state.pop("corr_widget", None)
-    st.rerun()
-
-# Normal path (no click): use edited value as-is, with diag forced to 1
-corr_matrix = corr_return.copy()
+# always force diagonal to 1
 np.fill_diagonal(corr_matrix.values, 1.0)
 
-# Persist clean copy to the store, and clear derived outputs if changed
-if not corr_matrix.equals(st.session_state.get("prev_corr_df")):
+# persist clean copy & clear derived outputs if changed
+_prev_corr = st.session_state.get("prev_corr_df")
+if _prev_corr is None or not corr_matrix.equals(_prev_corr):
     st.session_state["prev_corr_df"] = corr_matrix.copy()
     st.session_state["corr_store"] = corr_matrix.copy()
     st.session_state.pop("portfolio_paths", None)
     st.session_state.pop("x_axis", None)
 
+# (Optional) If you want a minimal read-only “stats” view for viewers on ?view=stats:
+if IS_VIEWER and VIEW == "stats":
+    viewer_back_link()
+    st.subheader("Current portfolio statistics")
+    # quick summary using current SAA
+    try:
+        mu = ltcma_df["Exp Return"].values
+        vols = ltcma_df["Exp Volatility"].values
+        w = ltcma_df["SAA"].values
+        cov = np.outer(vols, vols) * corr_matrix.values
+        exp_r = float(np.dot(w, mu))
+        exp_v = float(np.sqrt(w @ cov @ w))
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("Expected Return", f"{exp_r:.2%}")
+        with c2:
+            st.metric("Expected Volatility", f"{exp_v:.2%}")
+        st.dataframe(ltcma_df[["SAA", "Exp Return", "Exp Volatility"]])
+    except Exception:
+        pass
 
+#v6.2 NEW VERSION ADDITION   END
+
+
+    
 
 
 # Simulation Input Check
@@ -687,16 +859,76 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
     expected_portfolio_return = np.dot(weights_used, mu)
     expected_portfolio_volatility = np.sqrt(weights_used.T @ cov @ weights_used)
 
-    # Draw the 4 buttons
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-    with col1:
-        run_sim = st.button("Run Simulation")
-    with col2:
-        run_ef = st.button("Run Efficient Frontier")
-    with col3:
-        run_opt = st.button("Run Optimization")
-    with col4:
-        run_scenario = st.button("Run Scenario")
+
+    # v6 new design   BEGIN
+    # === ACTION LAUNCHER (buttons or viewer tiles) ===
+    IS_VIEWER = (ROLE == "viewer")
+    view = get_view_param("home")  # uses helpers you defined above
+
+    if IS_VIEWER:
+        # Viewer home screen with 4 large image buttons
+        if view in ("home", "", None):
+            st.subheader("Executive Menu")
+            r1c1, r1c2 = st.columns(2)
+
+            with r1c1:
+                image_tile("View current portfolio statistics",
+                           "Data/Portfolio Statistics.png", 
+                           "stats", height_px=230)
+            with r1c2:
+                image_tile("Run simulation paths",
+                           "Data/Simulations.png",
+                           "sim", height_px=230)
+
+            # ↓ Add a little vertical space between top and bottom rows
+            st.markdown("<div style='height: 18px'></div>", unsafe_allow_html=True)
+
+            r2c1, r2c2 = st.columns(2)
+
+            with r2c1:
+                image_tile("See the efficient frontier",
+                           "Data/Efficient Frontier.png",        
+                           "ef", height_px=230)
+            with r2c2:
+                image_tile("Run stress test scenarios",
+                           "Data/Stress Test Scenario.png",
+                           "scen", height_px=230)
+
+            # Make sure nothing else triggers until the viewer picks an action
+            run_sim = run_ef = run_opt = run_scenario = False
+            show_stats = False
+            st.stop()
+
+        # Viewer clicked a tile → set which block(s) below should run
+        run_sim = (view == "sim")
+        run_ef = (view == "ef")
+        run_opt = False  # viewers can’t optimize
+        run_scenario = (view == "scen")
+        show_stats = (view == "stats")
+
+    else:
+        # Admin / Analyst: keep the original 4 buttons
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+        with col1:
+            run_sim = st.button("Run Simulation")
+        with col2:
+            run_ef = st.button("Run Efficient Frontier")
+        with col3:
+            run_opt = st.button("Run Optimization", disabled=not cap["optimize"])
+        with col4:
+            run_scenario = st.button("Run Scenario", disabled=not cap["scenarios"])
+        show_stats = False
+
+
+    # v6 new design   END
+
+
+
+
+
+
+
+
 
     # Efficient Frontier
     if run_ef:
@@ -1197,7 +1429,8 @@ with tab1:
                 data=perc_xlsx,
                 file_name="percentile_paths.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_percentile_paths"
+                key="download_percentile_paths",
+                disabled=not cap["downloads"]
             )
         with c2:
             st.download_button(
@@ -1205,15 +1438,9 @@ with tab1:
                 data=paths_xlsx,
                 file_name="simulated_paths.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_paths_xlsx"
+                key="download_paths_xlsx",
+                disabled=not cap["downloads"]
             )
-
-
-
-
-
-
-
 
 
 
