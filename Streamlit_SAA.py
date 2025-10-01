@@ -121,7 +121,7 @@ from urllib.parse import quote_plus
 
 
 
-APP_VERSION = "v6.13.0"
+APP_VERSION = "v6.13.2"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -129,7 +129,7 @@ DEFAULT_CORR_PATH = "Data/Correlation Matrix.xlsx"
 DEFAULT_SCENARIO_PATH = "Data/Scenarios.xlsx"
 
 # NEW: baseline bundle to load via the "Restore" button
-DEFAULT_BASELINE_SESSION_PATH = "Data/baseline_session.pkl"  # <- put your .pkl here
+DEFAULT_BASELINE_SESSION_PATH = "Data/baseline_session.pkl" 
 DEFAULT_BASELINE_SCENARIO_PATH = "Data/Scenarios.xlsx"
 
 # Ensure the correlation matrix has the proper shape
@@ -921,30 +921,43 @@ start_date = st.sidebar.date_input(
     on_change=_invalidate_sim,        # <- NEW  v5.1
 )
 
-n_years = st.sidebar.slider(
-    "Investment Horizon (Years)",
-    1, 30,
-    #st.session_state["n_years"],   #v6.10
-    key="n_years",
-    on_change=_invalidate_sim,        # <- NEW  v5.1
-)
-
-frequency = st.sidebar.selectbox(
-    "Frequency",
-    ["monthly", "quarterly", "yearly"],
-    index=["monthly", "quarterly", "yearly"].index(st.session_state["frequency"]),
-    key="frequency",
-    on_change=_invalidate_sim,        # <- NEW v5.1
-)
-
-#initial_value = st.sidebar.number_input("Initial Portfolio Value", value=st.session_state["initial_value"], key="initial_value")
-#n_sims = st.sidebar.slider("Number of Simulations", 100, 5000, st.session_state["n_sims"], step=100, key="n_sims")
 
 initial_value = st.sidebar.number_input(
     "Initial Portfolio Value",
     #value=st.session_state["initial_value"],   #v6.10
     key="initial_value",
     on_change=_invalidate_sim,   # v6.7
+)
+
+# v6.13 for Viewers BEGIN
+
+# Hide Frequency selector for viewers
+if IS_VIEWER:
+    # keep whatever is already in session (your defaults set it to "monthly")
+    frequency = st.session_state.setdefault("frequency", "monthly")
+    # Optional line: show nothing by deleting the next line
+    st.sidebar.caption(f"🔒 Frequency: **{frequency.capitalize()}** (fixed)")
+else:
+    frequency = st.sidebar.selectbox(
+        "Frequency",
+        ["monthly", "quarterly", "yearly"],
+        index=["monthly", "quarterly", "yearly"].index(st.session_state["frequency"]),
+        key="frequency",
+        on_change=_invalidate_sim,
+    )
+# v6.13 for Viewers END
+
+
+#initial_value = st.sidebar.number_input("Initial Portfolio Value", value=st.session_state["initial_value"], key="initial_value")
+#n_sims = st.sidebar.slider("Number of Simulations", 100, 5000, st.session_state["n_sims"], step=100, key="n_sims")
+
+
+n_years = st.sidebar.slider(
+    "Investment Horizon (Years)",
+    1, 30,
+    #st.session_state["n_years"],   #v6.10
+    key="n_years",
+    on_change=_invalidate_sim,        # <- NEW  v5.1
 )
 
 n_sims = st.sidebar.slider(
