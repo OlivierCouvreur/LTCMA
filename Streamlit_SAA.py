@@ -103,25 +103,24 @@ Author:
 import streamlit as st
 import pandas as pd
 import numpy as np
-#import sys
 import matplotlib
-matplotlib.use('Agg')  # explicitly set backend
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 from io import BytesIO
 from scipy.optimize import minimize
 from scipy.stats import t
-from pathlib import Path  # For safer file suffix handling
+from pathlib import Path  
 import pickle
 import base64
-import hashlib, hmac, binascii  # v5.4
+import hashlib, hmac, binascii  
 from base64 import b64encode
-import time  # V6.4
+import time
 from urllib.parse import quote_plus
 
 
 
-APP_VERSION = "v6.13.2"
+APP_VERSION = "v6.15.2"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -185,9 +184,6 @@ if _qv is not None:  # accept "home", "sim", etc.
     st.session_state["view"] = _qv
 # --------------------------------------------------------------------
 
-
-# v6.8 BEGIN
-
 def _get_qp_single(key: str):
     try:
         val = st.query_params.get(key, None)  # Streamlit >= 1.30
@@ -240,9 +236,6 @@ if not st.session_state.get("_qp_applied_once", False):
     st.session_state["_qp_applied_once"] = True
 
 
-# v6.8 END
-
-
 
 # v6.11 Helpers for default data BEGIN
 def apply_session_dict(session_data: dict, *, overwrite_params: bool = False):
@@ -267,11 +260,10 @@ def apply_session_dict(session_data: dict, *, overwrite_params: bool = False):
         if overwrite_params:
             st.session_state[param_key] = param_value
         else:
-            # previous behavior (kept to respect URL overrides during first load)
             if param_key not in st.session_state:
                 st.session_state[param_key] = param_value
 
-    # optional: restore optimized weights if present
+    # restore optimized weights if present
     if session_data.get("optimized_weights") is not None:
         st.session_state["optimized_weights"] = session_data["optimized_weights"].copy()
 
@@ -303,12 +295,6 @@ def load_baseline_session_and_scenarios(*, overwrite_params: bool = True):
         st.error(f"Failed to load baseline: {e}")
 
 # v6.11 Helpers for default data END
-
-
-
-
-
-
 
 # v6.3 Helpers for avoiding hard resets BEGIN
 
@@ -393,31 +379,23 @@ def viewer_back_link():
         st.rerun()
 
 
-
 def render_logo_top_right(img_path: str, height_px: int = 42):
-    """
-    Fixed, non-clickable logo in the top-right corner.
-    """
     img_b64 = load_image_b64(img_path)
     st.markdown(
         f"""
         <div style="
-            position: fixed;
-            top: 70px;
-            right: 180px;
-            z-index: 1000;
+            width:100%;
+            display:flex;
+            justify-content:flex-end;
+            margin: -6px 0 10px 0;
         ">
             <img
                 src="data:image/png;base64,{img_b64}"
                 alt="Logo"
-                draggable="false"
                 style="
                     height: clamp(32px, 8vw, {height_px}px);
-                    display: block;
                     border-radius: 6px;
                     box-shadow: 0 2px 8px rgba(0,0,0,.18);
-                    user-select: none;
-                    pointer-events: none; /* <- ignores clicks */
                 "
             />
         </div>
@@ -664,13 +642,18 @@ IS_VIEWER = (ROLE == "viewer")
 VIEW = get_view_param("home")  # optional; only needed if you reference VIEW before the later block
 
 
+# show a back button on all viewer sub-views except the scenario screen (which has its own header)
+# if IS_VIEWER and view in ("sim", "ef", "stats"):
+#    viewer_back_link()
+
+
 #v5.4  Users/Password
 
 
 
 
 #v6.2 LOGO
-render_logo_top_right("Data/Logo.png", height_px=150)
+render_logo_top_right("Data/Logo.png", height_px=120)  # size of the logo
 
 
 def _invalidate_sim():
@@ -1070,25 +1053,14 @@ use_optimized_weights = st.session_state.get("use_optimized_weights", False)
 
 
 # Scenario Analysis
-with st.sidebar.expander("Historical Scenario Analysis"):
-    selected_scenario = None
-    scenarios_df = None
+# --- Scenario Analysis (SIDEBAR) ---
+# Hide the entire sidebar box for viewers. Keep admin/analyst exactly as-is.
+# Also define defaults so later code (run_scenario) always has these names available.
+selected_scenario = None
+scenarios_df = None
 
-    if IS_VIEWER:
-        # Only the preloaded list
-        _default_scen = st.session_state.get("default_scenarios_df")
-        if _default_scen is not None and not _default_scen.empty:
-            st.caption("Using preloaded baseline scenarios")
-            scenarios_df = _default_scen.copy()
-            scenario_names = scenarios_df.iloc[:, 0].astype(str).tolist()
-            selected_scenario = st.selectbox("Select Scenario", scenario_names, key="viewer_scenario_select")
-        else:
-            st.info("No baseline scenarios available.")
-        # Force this off for viewers (they can’t optimize anyway)
-        use_opt_in_scenario = st.session_state.setdefault("use_opt_in_scenario", False)
-
-    else:
-        # Full analyst/admin UI
+if not IS_VIEWER:
+    with st.sidebar.expander("Historical Scenario Analysis"):
         scenario_file = st.file_uploader("Upload Historical Scenarios", type=["xlsx"])
         st.checkbox("Use Optimized Weights in Scenario", key="use_opt_in_scenario")
         use_opt_in_scenario = st.session_state.get("use_opt_in_scenario", False)
@@ -1103,19 +1075,21 @@ with st.sidebar.expander("Historical Scenario Analysis"):
             except Exception as e:
                 st.error(f"Error reading scenario file: {e}")
 
-            if scenarios_df is not None and not scenarios_df.empty:
-                scenario_names = scenarios_df.iloc[:, 0].astype(str).tolist()
-                selected_scenario = st.selectbox("Select Scenario", scenario_names)
-
         # Fallback to preloaded if no upload or empty
         if scenarios_df is None:
             _default_scen = st.session_state.get("default_scenarios_df")
             if _default_scen is not None and not _default_scen.empty:
                 st.caption("Using preloaded baseline scenarios")
                 scenarios_df = _default_scen.copy()
-                scenario_names = scenarios_df.iloc[:, 0].astype(str).tolist()
-                selected_scenario = st.selectbox("Select Scenario", scenario_names)
 
+        # Only show the picker if scenarios exist
+        if scenarios_df is not None and not scenarios_df.empty:
+            scenario_names = scenarios_df.iloc[:, 0].astype(str).tolist()
+            selected_scenario = st.selectbox("Select Scenario", scenario_names)
+
+else:
+    # Viewers: no sidebar UI; force this off since viewers can’t optimize anyway
+    st.session_state.setdefault("use_opt_in_scenario", False)
 
 
 # v6.11 hidding some elements of the Sidebar for VIEWERS - BEGIN
@@ -1337,7 +1311,21 @@ if IS_VIEWER and VIEW == "stats":
             st.metric("Expected Return", f"{exp_r:.2%}")
         with c2:
             st.metric("Expected Volatility", f"{exp_v:.2%}")
-        st.dataframe(ltcma_df[["SAA", "Exp Return", "Exp Volatility"]])
+        #st.dataframe(ltcma_df[["SAA", "Exp Return", "Exp Volatility"]])
+
+
+        df_pct = (ltcma_df[["SAA", "Exp Return", "Exp Volatility"]].copy() * 100)
+
+        st.dataframe(
+            df_pct,
+            column_config={
+                "SAA": st.column_config.NumberColumn("SAA", format="%.1f%%"),
+                "Exp Return": st.column_config.NumberColumn("Exp Return", format="%.2f%%"),
+                "Exp Volatility": st.column_config.NumberColumn("Exp Volatility", format="%.2f%%"),
+            },
+            width="stretch",
+        )
+  
     except Exception:
         pass
 
@@ -1397,9 +1385,12 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
     IS_VIEWER = (ROLE == "viewer")
     view = get_view_param("home")  # uses helpers you defined above
 
-    if IS_VIEWER and view not in ("home", "", None):
-        viewer_back_link()
+    # v6.15
+    #if IS_VIEWER and view not in ("home", "", None):
+    #    viewer_back_link()
 
+    if IS_VIEWER and view in ("sim", "ef", "stats"):
+        viewer_back_link()
 
     if IS_VIEWER:
         # Viewer home screen with 4 large image buttons
@@ -1440,6 +1431,52 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
         run_opt = False  # viewers can’t optimize
         run_scenario = (view == "scen")
         show_stats = (view == "stats")
+
+        # v6.15
+        # ----- Viewer top bar on Scenario view: Back (left) + Scenario picker (right)
+        if IS_VIEWER and view == "scen":
+            tl, tr = st.columns([1, 2])
+            with tl:
+                viewer_back_link()
+            with tr:
+                scen_df = st.session_state.get("default_scenarios_df")
+                if scen_df is None or scen_df.empty:
+                    # tiny fallback if baseline didn't pre-load for some reason
+                    try:
+                        scen_df = pd.read_excel(DEFAULT_BASELINE_SCENARIO_PATH)
+                        st.session_state["default_scenarios_df"] = scen_df.copy()
+                    except Exception:
+                        scen_df = None
+
+                if scen_df is not None and not scen_df.empty:
+                    scenario_names = scen_df.iloc[:, 0].astype(str).tolist()
+                    current = st.session_state.get("viewer_scenario_select")
+                    if current not in scenario_names:
+                        current = scenario_names[0]
+
+                    sel = st.selectbox(
+                        "Scenario",
+                        scenario_names,
+                        index=scenario_names.index(current),
+                        key="viewer_scenario_select",            # reuse the same key as before
+                        label_visibility="collapsed"             # tidy UI; remove if you prefer the label
+                    )
+
+                    # keep ?scen=... in the URL so links/bookmarks work
+                    try:
+                        st.query_params.update({"scen": sel})
+                    except Exception:
+                        qp = st.experimental_get_query_params()
+                        qp.update({"scen": sel})
+                        st.experimental_set_query_params(**qp)
+                else:
+                    st.warning("No scenarios available.")
+
+
+
+
+
+
 
     else:
         # Admin / Analyst: keep the original 4 buttons
@@ -1505,6 +1542,13 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
         ax2.set_title('Efficient Frontier')
         ax2.grid(True)
         ax2.legend()
+
+
+        pct0 = FuncFormatter(lambda v, pos: f"{v:.0%}")   # 0 decimals (e.g., 12%)
+        pct1 = FuncFormatter(lambda v, pos: f"{v:.1%}")   # 1 decimal (e.g., 12.3%)
+
+        ax2.xaxis.set_major_formatter(pct0)  # Volatility as %
+        ax2.yaxis.set_major_formatter(pct1)  # Return as %
 
         # Put the chart in a centered, narrower column v6.10
         center_plot(fig2, ratio=(1, 4, 1), figsize=(10, 7))
@@ -1583,8 +1627,19 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
 
         st.session_state.simulation_has_run = True
 
+        #st.write("Weights used in simulation:")
+        #st.dataframe(pd.DataFrame({"Weight": weights_to_use}, index=ltcma_df.index))
+
         st.write("Weights used in simulation:")
-        st.dataframe(pd.DataFrame({"Weight": weights_to_use}, index=ltcma_df.index))
+        wdf = pd.DataFrame({"Weight": weights_to_use}, index=ltcma_df.index)
+        
+        wdf_pct = (wdf * 100).rename(columns={"Weight": "Weight (%)"})
+
+        st.dataframe(
+            wdf_pct,
+            column_config={"Weight (%)": st.column_config.NumberColumn(format="%.1f%%")},
+            width="stretch",
+        )
 
 
     # Optimize
@@ -1614,9 +1669,19 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
             opt_v = np.sqrt(opt_w.T @ cov @ opt_w)
             st.success("Optimization Successful")
             st.write("**Optimized Weights:**")
-            formatted_weights = pd.DataFrame({"Weight": opt_w}, index=ltcma_df.index)
-            formatted_weights["Weight"] = formatted_weights["Weight"].map("{:.4f}".format)
-            st.dataframe(formatted_weights)
+
+            opt_df = pd.DataFrame({"Weight (%)": opt_w * 100}, index=ltcma_df.index)
+            st.dataframe(
+                opt_df,
+                column_config={"Weight (%)": st.column_config.NumberColumn(format="%.1f%%")},
+                width="stretch",
+            )
+
+
+            
+            #formatted_weights = pd.DataFrame({"Weight": opt_w}, index=ltcma_df.index)
+            #formatted_weights["Weight"] = formatted_weights["Weight"].map("{:.4f}".format)
+            #st.dataframe(formatted_weights)
             
             fig_opt, ax_opt = plt.subplots()
             ax_opt.scatter(opt_v, opt_r, c='green', label='Optimized Portfolio')
@@ -1625,7 +1690,15 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
             ax_opt.set_title('Optimized Portfolio Result')
             ax_opt.grid(True)
             ax_opt.legend()
-            st.pyplot(fig_opt)
+
+
+            pct0 = FuncFormatter(lambda v, pos: f"{v:.0%}")
+            pct1 = FuncFormatter(lambda v, pos: f"{v:.1%}")
+            ax_opt.xaxis.set_major_formatter(pct0)
+            ax_opt.yaxis.set_major_formatter(pct1)
+            
+            #st.pyplot(fig_opt)
+            center_plot(fig_opt, ratio=(1, 4, 1), figsize=(10, 7))
 
             opt_buf = BytesIO()
             fig_opt.savefig(opt_buf, format="png")
@@ -1640,12 +1713,38 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
     # Stress Test Scenario
     if run_scenario:
 
+        # Make sure this exists for both roles
+        use_opt_in_scenario = bool(st.session_state.get("use_opt_in_scenario", False))
+
+        # v6.15
+        # --- ensure scenarios_df and selected_scenario exist (viewer path) ---
+        if IS_VIEWER:
+            # use the cached baseline scenarios if present
+            if scenarios_df is None:
+                scenarios_df = st.session_state.get("default_scenarios_df")
+
+            # last-resort: load from disk so viewers still work
+            if scenarios_df is None or scenarios_df.empty:
+                try:
+                    scenarios_df = pd.read_excel(DEFAULT_BASELINE_SCENARIO_PATH)
+                    st.session_state["default_scenarios_df"] = scenarios_df.copy()
+                except Exception:
+                    scenarios_df = None
+
+            # if user hasn't picked yet, default to the first scenario
+            if selected_scenario is None and scenarios_df is not None and not scenarios_df.empty:
+                scenario_names = scenarios_df.iloc[:, 0].astype(str).tolist()
+                if scenario_names:
+                    selected_scenario = st.session_state.setdefault("viewer_scenario_select", scenario_names[0])
+
+
         # For viewers, prefer the live value from session_state
         if IS_VIEWER:
             selected_scenario = st.session_state.get("viewer_scenario_select", selected_scenario)
         
         if scenarios_df is None:
-            st.error("No scenario file uploaded. Please upload a CSV or Excel file with scenarios.")
+            #st.error("No scenario file uploaded. Please upload a CSV or Excel file with scenarios.")
+            st.error("No scenarios available. Upload an Excel (.xlsx) in the sidebar (analyst/admin) or load the baseline.")
         elif selected_scenario is None:
             st.error("No scenario selected. Please select a scenario from the dropdown.")
         elif ltcma_df.empty:
@@ -1692,28 +1791,62 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                     )
 
                 # 6) build contribution table using aligned vectors
+                #impact_df = pd.DataFrame(
+                #    {
+                #        "Asset Class": ltcma_assets,
+                #        "Shock Return": scenario_aligned.values,
+                #        "Weight": weights_used.values,
+                #    },
+                #    index=ltcma_assets,
+                #)
+                #impact_df["Contribution"] = impact_df["Shock Return"] * impact_df["Weight"]
+
+                # Format numerical columns for display
+                #formatted_df = impact_df.copy()
+                #formatted_df["Shock Return"] = (formatted_df["Shock Return"] * 100).map("{:.2f}%".format)
+                #formatted_df["Contribution"] = (formatted_df["Contribution"] * 100).map("{:.2f}%".format)
+
+                #st.dataframe(formatted_df)
+
+
+                # 6) build contribution table using aligned vectors (no duplicate name column)
                 impact_df = pd.DataFrame(
                     {
-                        "Asset Class": ltcma_assets,
                         "Shock Return": scenario_aligned.values,
                         "Weight": weights_used.values,
                     },
                     index=ltcma_assets,
                 )
+                impact_df.index.name = "Asset Class"
                 impact_df["Contribution"] = impact_df["Shock Return"] * impact_df["Weight"]
 
-                # Format numerical columns for display
-                formatted_df = impact_df.copy()
-                formatted_df["Shock Return"] = (formatted_df["Shock Return"] * 100).map("{:.2f}%".format)
-                formatted_df["Contribution"] = (formatted_df["Contribution"] * 100).map("{:.2f}%".format)
+                # Display with percentages
+                disp = pd.DataFrame(
+                    {
+                        "Weight (%)":        impact_df["Weight"] * 100,
+                        "Shock Return (%)":  impact_df["Shock Return"] * 100,
+                        "Contribution (%)":  impact_df["Contribution"] * 100,
+                    },
+                    index=impact_df.index,
+                )
 
-                st.dataframe(formatted_df)
+                st.dataframe(
+                    disp,
+                    column_config={
+                        "Weight (%)":       st.column_config.NumberColumn(format="%.1f%%"),
+                        "Shock Return (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                        "Contribution (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                    },
+                    width="stretch",
+                )
 
-
+                
 
                 fig, ax = plt.subplots(figsize=(7, 4))
-                ax.bar(impact_df["Asset Class"], impact_df["Contribution"], color="cornflowerblue")
-                ax.axhline(scenario_return, color='red', linestyle='--', label=f"Total: {scenario_return:.2%}")
+                #ax.bar(impact_df["Asset Class"], impact_df["Contribution"], color="cornflowerblue")
+                ax.bar(impact_df.index, impact_df["Contribution"], color="cornflowerblue")
+                ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0%}"))  # use this for 0 decimals
+                ax.axhline(scenario_return, color='red', linestyle='--', label=f"Total: {scenario_return:.1%}")
                 ax.set_title("Contribution to Portfolio Return under Scenario")
                 ax.set_ylabel("Contribution")
                 ax.set_xlabel("Asset Class")
@@ -1737,10 +1870,18 @@ SHOW_TABS = (ROLE != "viewer") or (VIEW == "sim")
 
 #v6.9 ------------------------------
 if SHOW_TABS:
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["Simulation Chart", "Summary Statistics", "Value at Risk", "Drawdown Analysis"]
-    )
 
+    # Create tabs (viewer gets no VaR tab)
+    if IS_VIEWER:
+        t_sim, t_sum, t_dd = st.tabs(
+            ["Simulation Chart", "Summary Statistics", "Drawdown Analysis"]
+        )
+    else:
+        t_sim, t_sum, t_var, t_dd = st.tabs(
+            ["Simulation Chart", "Summary Statistics", "Value at Risk", "Drawdown Analysis"]
+        )
+
+ 
     # small helper: do we have data to render?
     has_data = (
         st.session_state.get("simulation_has_run")
@@ -1750,7 +1891,7 @@ if SHOW_TABS:
 
 
     # v5.2
-    with tab1:
+    with t_sim:
         if not has_data:
             st.info("Run a simulation to see the chart.")
         else:
@@ -1871,7 +2012,6 @@ if SHOW_TABS:
             else:
                 # ------- Matplotlib (static) -------
 
-
                 # --- Matplotlib version (matches v4.12.3 visuals) ---
                 if not has_data:
                     st.info("Run a simulation to see the chart.")
@@ -1942,8 +2082,6 @@ if SHOW_TABS:
                     st.pyplot(fig)
 
    
-
-
             # -------- shared downloads (Excel) --------
             percentile_df = pd.DataFrame({
                 "5th Percentile": p05,
@@ -1995,8 +2133,7 @@ if SHOW_TABS:
                 )
 
 
-
-    with tab2:
+    with t_sum:
         if not has_data:
             st.info("Run a simulation to see summary statistics.")
         else:
@@ -2014,11 +2151,14 @@ if SHOW_TABS:
                 mean_final = np.mean(portfolio_paths[-1])
                 median_final = np.median(portfolio_paths[-1])
                 pctiles = np.percentile(portfolio_paths[-1], [5, 25, 75, 95])
-                st.markdown(f"**Final Value (Mean):** ${mean_final:,.2f}")
-                st.markdown(f"**Final Value (Median):** ${median_final:,.2f}")
-                st.markdown(f"**25–75% Range:** ${pctiles[1]:,.2f} – ${pctiles[2]:,.2f}")
-                st.markdown(f"**5–95% Range:** ${pctiles[0]:,.2f} – ${pctiles[3]:,.2f}")
-
+                st.markdown(f"**Final Value (Mean):** ${mean_final:,.0f}")
+                st.markdown(f"**5th Percentile :** ${pctiles[0]:,.0f}")
+                st.markdown(f"**25th Percentile :** ${pctiles[1]:,.0f}")
+                st.markdown(f"**Final Value (Median):** ${median_final:,.0f}")
+                st.markdown(f"**75th Percentile :** ${pctiles[2]:,.0f}")
+                st.markdown(f"**95th Percentile :** ${pctiles[3]:,.0f}")
+                
+                
             with right_col_final:
 
                 fig_hist, ax_hist = plt.subplots(figsize=(5, 4))
@@ -2073,104 +2213,104 @@ if SHOW_TABS:
                         key="download_final_values"
                     )
  
+    if not IS_VIEWER:
+        with t_var:
+            if not has_data:
+                st.info("Run a simulation to see VaR.")
+            else:
+                portfolio_paths = st.session_state["portfolio_paths"]
+                x_axis = st.session_state["x_axis"]
 
-    with tab3:
-        if not has_data:
-            st.info("Run a simulation to see VaR.")
-        else:
-            portfolio_paths = st.session_state["portfolio_paths"]
-            x_axis = st.session_state["x_axis"]
-
-            st.subheader("Value at Risk Statistics")
-            if var_years * steps_per_year <= n_steps:
-                steps_for_var = int(var_years * steps_per_year)
-                var_values = portfolio_paths[steps_for_var]
-                var_threshold = np.percentile(var_values, 100 - var_confidence)
-                var_loss = initial_value - var_threshold
-                var_pct_loss = var_loss / initial_value
-
-                cvar_values = var_values[var_values <= var_threshold]
-                cvar_mean = np.mean(cvar_values) if len(cvar_values) > 0 else np.nan
-                cvar_loss = initial_value - cvar_mean
-                cvar_pct_loss = cvar_loss / initial_value
-
-                left_col_var, right_col_var = st.columns([1, 2])
-
-                with left_col_var:
-                    st.markdown(f"**{var_confidence}% {var_years}-Year Value at Risk (VaR):** With {var_confidence}% confidence, "
-                        f"the portfolio value will not fall below ${var_threshold:,.2f}.")
-                    st.markdown(f"This represents a potential shortfall of ${var_loss:,.2f} ({var_pct_loss:.2%}) from the initial value.")
-                    st.markdown(
-                        f"**{var_confidence}% Conditional VaR (CVaR):**\n"
-                        f"Expected average shortfall beyond VaR is **${cvar_loss:,.2f} ({cvar_pct_loss:.2%})**."
-                    )
-                    st.markdown(f"**Average VaR:** {np.mean(var_values):.2f}")
-                    st.markdown(f"**Worst VaR:** {np.min(var_values):.2f}")
-                    st.markdown(f"**5th Percentile VaR:** {np.percentile(var_values, 5):.2f}")
-                    st.markdown(f"**25th Percentile VaR:** {np.percentile(var_values, 25):.2f}")
-                    st.markdown(f"**Median VaR:** {np.percentile(var_values, 50):.2f}")
-                    st.markdown(f"**75th Percentile VaR:** {np.percentile(var_values, 75):.2f}")
-                    st.markdown(f"**95th Percentile VaR:** {np.percentile(var_values, 95):.2f}")
-
-                with right_col_var:
-                
+                st.subheader("Value at Risk Statistics")
+                if var_years * steps_per_year <= n_steps:
+                    steps_for_var = int(var_years * steps_per_year)
+                    var_values = portfolio_paths[steps_for_var]
                     var_threshold = np.percentile(var_values, 100 - var_confidence)
-                    fig_var, ax_var = plt.subplots(figsize=(5, 4))
+                    var_loss = initial_value - var_threshold
+                    var_pct_loss = var_loss / initial_value
 
-                    # Compute reasonable axis limits using percentiles
-                    x_min, x_max = np.percentile(var_values, [1, 99])
-                    # Plot histogram within these bounds
-                    ax_var.hist(var_values, bins=50, range=(x_min/2, x_max*1.5), color='lightgrey', edgecolor='black')
-                    # Explicitly set x-axis limits
-                    ax_var.set_xlim(x_min/2, x_max*1.5)
+                    cvar_values = var_values[var_values <= var_threshold]
+                    cvar_mean = np.mean(cvar_values) if len(cvar_values) > 0 else np.nan
+                    cvar_loss = initial_value - cvar_mean
+                    cvar_pct_loss = cvar_loss / initial_value
 
-                    ax_var.axvline(var_threshold, color='red', linestyle='--', label=f'{var_confidence}% VaR = {var_threshold:,.2f}')
-                    ax_var.set_title(f"{var_confidence}% VaR at Year {var_years}")
-                    ax_var.set_xlabel("Portfolio Value")
-                    ax_var.set_ylabel("Frequency")
-                    ax_var.legend()
+                    left_col_var, right_col_var = st.columns([1, 2])
 
-                    # Save buffer for download
-                    var_buf = BytesIO()
-                    fig_var.savefig(var_buf, format="png")
-                    var_buf.seek(0)
-                    st.session_state["fig_var"] = fig_var
-                    st.session_state["buf_var"] = var_buf
-
-                    # Display and download
-                    st.pyplot(fig_var)
-
-                    # Export final period returns for VaR to Excel
-                    var_df = pd.DataFrame({"Final Period Return": var_values})
-                    excel_buf_var = BytesIO()
-                    with pd.ExcelWriter(excel_buf_var, engine="openpyxl") as writer:
-                        var_df.to_excel(writer, sheet_name="VaR Distribution", index=False)
-                    excel_buf_var.seek(0)
-
-                    left_button, right_button = st.columns([1, 1])
-
-                    with left_button:
-                        st.download_button(
-                            label=f"Download {var_confidence}% VaR Distribution Chart",
-                            data=st.session_state["buf_var"],key="download_var2",
-                            file_name="var_distribution.png",
-                            mime="image/png"
+                    with left_col_var:
+                        st.markdown(f"**{var_confidence}% {var_years}-Year Value at Risk (VaR):** With {var_confidence}% confidence, "
+                            f"the portfolio value will not fall below ${var_threshold:,.1f}.")
+                        st.markdown(f"This represents a potential shortfall of ${var_loss:,.1f} ({var_pct_loss:.1%}) from the initial value.")
+                        st.markdown(
+                            f"**{var_confidence}% Conditional VaR (CVaR):**\n"
+                            f"Expected average shortfall beyond VaR is **${cvar_loss:,.1f} ({cvar_pct_loss:.1%})**."
                         )
+                        st.markdown(f"**Average VaR:** {np.mean(var_values):.1f}")
+                        st.markdown(f"**Worst VaR:** {np.min(var_values):.1f}")
+                        st.markdown(f"**5th Percentile VaR:** {np.percentile(var_values, 5):.1f}")
+                        st.markdown(f"**25th Percentile VaR:** {np.percentile(var_values, 25):.1f}")
+                        st.markdown(f"**Median VaR:** {np.percentile(var_values, 50):.1f}")
+                        st.markdown(f"**75th Percentile VaR:** {np.percentile(var_values, 75):.1f}")
+                        st.markdown(f"**95th Percentile VaR:** {np.percentile(var_values, 95):.1f}")
+
+                    with right_col_var:
+                
+                        var_threshold = np.percentile(var_values, 100 - var_confidence)
+                        fig_var, ax_var = plt.subplots(figsize=(5, 4))
+
+                        # Compute reasonable axis limits using percentiles
+                        x_min, x_max = np.percentile(var_values, [1, 99])
+                        # Plot histogram within these bounds
+                        ax_var.hist(var_values, bins=50, range=(x_min/2, x_max*1.5), color='lightgrey', edgecolor='black')
+                        # Explicitly set x-axis limits
+                        ax_var.set_xlim(x_min/2, x_max*1.5)
+
+                        ax_var.axvline(var_threshold, color='red', linestyle='--', label=f'{var_confidence}% VaR = {var_threshold:,.1f}')
+                        ax_var.set_title(f"{var_confidence}% VaR at Year {var_years}")
+                        ax_var.set_xlabel("Portfolio Value")
+                        ax_var.set_ylabel("Frequency")
+                        ax_var.legend()
+
+                        # Save buffer for download
+                        var_buf = BytesIO()
+                        fig_var.savefig(var_buf, format="png")
+                        var_buf.seek(0)
+                        st.session_state["fig_var"] = fig_var
+                        st.session_state["buf_var"] = var_buf
+
+                        # Display and download
+                        st.pyplot(fig_var)
+
+                        # Export final period returns for VaR to Excel
+                        var_df = pd.DataFrame({"Final Period Return": var_values})
+                        excel_buf_var = BytesIO()
+                        with pd.ExcelWriter(excel_buf_var, engine="openpyxl") as writer:
+                            var_df.to_excel(writer, sheet_name="VaR Distribution", index=False)
+                        excel_buf_var.seek(0)
+
+                        left_button, right_button = st.columns([1, 1])
+
+                        with left_button:
+                            st.download_button(
+                                label=f"Download {var_confidence}% VaR Distribution Chart",
+                                data=st.session_state["buf_var"],key="download_var2",
+                                file_name="var_distribution.png",
+                                mime="image/png"
+                            )
                     
-                    with right_button:
-                        st.download_button(
-                           label="Download VaR Returns (Excel)",
-                           data=excel_buf_var,
-                           file_name="var_distribution.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           key="download_var_excel"
-                       )
+                        with right_button:
+                            st.download_button(
+                               label="Download VaR Returns (Excel)",
+                               data=excel_buf_var,
+                               file_name="var_distribution.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="download_var_excel"
+                           )
  
             
-            else:
-                st.warning("VaR horizon exceeds simulation length. Increase investment horizon or reduce VaR years.")
+                else:
+                    st.warning("VaR horizon exceeds simulation length. Increase investment horizon or reduce VaR years.")
 
-    with tab4:
+    with t_dd:
         if not has_data:
             st.info("Run a simulation to see drawdown analysis.")
         else:
@@ -2217,13 +2357,13 @@ if SHOW_TABS:
             left_col_dd, right_col_dd = st.columns([1, 2])
 
             with left_col_dd:
-                st.markdown(f"**Average Max Drawdown:** {np.mean(max_drawdowns):.2%}")
-                st.markdown(f"**Worst Max Drawdown:** {np.max(max_drawdowns):.2%}")
-                st.markdown(f"**5th Percentile Max Drawdown:** {np.percentile(max_drawdowns, 5):.2%}")
-                st.markdown(f"**25th Percentile Max Drawdown:** {np.percentile(max_drawdowns, 25):.2%}")
-                st.markdown(f"**Median Max Drawdown:** {np.percentile(max_drawdowns, 50):.2%}")
-                st.markdown(f"**75th Percentile Max Drawdown:** {np.percentile(max_drawdowns, 75):.2%}")
-                st.markdown(f"**95th Percentile Max Drawdown:** {np.percentile(max_drawdowns, 95):.2%}")
+                st.markdown(f"**Average Max Drawdown:** {np.mean(max_drawdowns):.1%}")
+                st.markdown(f"**Worst Max Drawdown:** {np.max(max_drawdowns):.1%}")
+                st.markdown(f"**5th Percentile Max Drawdown:** {np.percentile(max_drawdowns, 5):.1%}")
+                st.markdown(f"**25th Percentile Max Drawdown:** {np.percentile(max_drawdowns, 25):.1%}")
+                st.markdown(f"**Median Max Drawdown:** {np.percentile(max_drawdowns, 50):.1%}")
+                st.markdown(f"**75th Percentile Max Drawdown:** {np.percentile(max_drawdowns, 75):.1%}")
+                st.markdown(f"**95th Percentile Max Drawdown:** {np.percentile(max_drawdowns, 95):.1%}")
 
                 # recovery time stats only for simulations that actually recovered
                 rec_array = np.array(recovery_times, dtype=float)
