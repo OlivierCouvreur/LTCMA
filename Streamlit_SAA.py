@@ -120,7 +120,7 @@ from urllib.parse import quote_plus
 
 
 
-APP_VERSION = "v6.15.3"
+APP_VERSION = "v6.15.5"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -1435,9 +1435,15 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
         # v6.15
         # ----- Viewer top bar on Scenario view: Back (left) + Scenario picker (right)
         if IS_VIEWER and view == "scen":
-            tl, tr = st.columns([1, 2])
+            tl, lbl_col, tr = st.columns([1, 1, 3])
             with tl:
                 viewer_back_link()
+
+            with lbl_col:
+                st.markdown(
+                    "<div style='margin-top:10px; white-space:nowrap; font-weight:600;'>Pick a scenario →</div>",
+                    unsafe_allow_html=True
+                )
             with tr:
                 scen_df = st.session_state.get("default_scenarios_df")
                 if scen_df is None or scen_df.empty:
@@ -1842,22 +1848,43 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
 
                 
 
-                fig, ax = plt.subplots(figsize=(7, 4))
-                #ax.bar(impact_df["Asset Class"], impact_df["Contribution"], color="cornflowerblue")
-                ax.bar(impact_df.index, impact_df["Contribution"], color="cornflowerblue")
-                ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0%}"))  # use this for 0 decimals
-                ax.axhline(scenario_return, color='red', linestyle='--', label=f"Total: {scenario_return:.1%}")
-                ax.set_title("Contribution to Portfolio Return under Scenario")
-                ax.set_ylabel("Contribution")
-                ax.set_xlabel("Asset Class")
-                ax.tick_params(axis='x', rotation=30, labelsize=9)
-                ax.legend()
+                # Waterfall chart of contributions (Plotly)
+                from plotly import graph_objects as go
 
+                labels   = list(impact_df.index) + ["Total"]
+                measures = ["relative"] * len(impact_df) + ["total"]
+                values   = list(impact_df["Contribution"].values) + [scenario_return]
 
-                # Put the chart in a centered, narrower column v6.10
-                center_plot(fig, ratio=(1, 4, 1), figsize=(7, 4))
+                fig = go.Figure(go.Waterfall(
+                    orientation="v",
+                    measure=measures,
+                    x=labels,
+                    y=values,
+                    text=[f"{v:.2%}" for v in impact_df["Contribution"]] + [f"{scenario_return:.2%}"],
+                    textposition="outside",
+                    connector={"line": {"width": 1}},
+                ))
+
+                fig.update_layout(
+                    title=f"Scenario Contribution Waterfall — {selected_scenario}",
+                    yaxis=dict(title="Contribution", tickformat=".0%"),
+                    xaxis=dict(title="Asset Class"),
+                    showlegend=False,
+                    height=420,
+                    margin=dict(l=40, r=40, t=36, b=20),
+                )
+
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    config={
+                        "displaylogo": False,
+                        "toImageButtonOptions": {"format": "png", "filename": "scenario_waterfall", "scale": 2},
+                    },
+                )
 
                 st.markdown(f"**Portfolio Return under Scenario '{selected_scenario}':** {scenario_return:.2%}")
+
 
 
 
