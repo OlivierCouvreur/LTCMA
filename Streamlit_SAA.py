@@ -120,7 +120,7 @@ from urllib.parse import quote_plus
 
 
 
-APP_VERSION = "v6.15.2"
+APP_VERSION = "v6.15.3"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -1630,16 +1630,16 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
         #st.write("Weights used in simulation:")
         #st.dataframe(pd.DataFrame({"Weight": weights_to_use}, index=ltcma_df.index))
 
-        st.write("Weights used in simulation:")
-        wdf = pd.DataFrame({"Weight": weights_to_use}, index=ltcma_df.index)
-        
-        wdf_pct = (wdf * 100).rename(columns={"Weight": "Weight (%)"})
 
-        st.dataframe(
-            wdf_pct,
-            column_config={"Weight (%)": st.column_config.NumberColumn(format="%.1f%%")},
-            width="stretch",
-        )
+        if not IS_VIEWER:
+            with st.expander("Weights used in simulation", expanded=False):
+                wdf = pd.DataFrame({"Weight": weights_to_use}, index=ltcma_df.index)
+                wdf_pct = (wdf * 100).rename(columns={"Weight": "Weight (%)"})
+                st.dataframe(
+                    wdf_pct,
+                    column_config={"Weight (%)": st.column_config.NumberColumn(format="%.1f%%")},
+                    width="stretch",
+                )
 
 
     # Optimize
