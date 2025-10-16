@@ -120,7 +120,7 @@ from urllib.parse import quote_plus
 
 
 
-APP_VERSION = "v7.1.0 PW"
+APP_VERSION = "v7.1.1 PW"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -1306,12 +1306,19 @@ if IS_VIEWER and VIEW == "stats":
         cov = np.outer(vols, vols) * corr_matrix.values
         exp_r = float(np.dot(w, mu))
         exp_v = float(np.sqrt(w @ cov @ w))
-        c1, c2 = st.columns(2)
+
+
+        rf = float(st.session_state.get("risk_free_rate", 0.03))  #v7.1.1 Sharpe Ratio
+        sharpe = (exp_r - rf) / exp_v if exp_v > 0 else float("nan")
+
+        c1, c2, c3 = st.columns(3)
         with c1:
             st.metric("Expected Return", f"{exp_r:.2%}")
         with c2:
             st.metric("Expected Volatility", f"{exp_v:.2%}")
-        #st.dataframe(ltcma_df[["SAA", "Exp Return", "Exp Volatility"]])
+        with c3:
+            st.metric("Sharpe (vs Rf)", f"{sharpe:.2f}", help=f"Risk-free: {rf:.2%}")
+
 
 
         df_pct = (ltcma_df[["SAA", "Exp Return", "Exp Volatility"]].copy() * 100)
