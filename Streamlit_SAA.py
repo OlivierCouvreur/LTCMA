@@ -120,7 +120,7 @@ from urllib.parse import quote_plus
 
 
 
-APP_VERSION = "v6.15.5"
+APP_VERSION = "v7.1.0 PW"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -1873,6 +1873,14 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                     height=420,
                     margin=dict(l=40, r=40, t=36, b=20),
                 )
+
+                # v7.1  +20% padding around the numeric axis
+                mn = min(0, min(values))
+                mx = max(0, max(values))
+                span = mx - mn if mx != mn else max(abs(mx), 1.0)
+                pad = 0.2 * span
+                fig.update_yaxes(range=[mn - pad, mx + pad])
+    
 
                 st.plotly_chart(
                     fig,
