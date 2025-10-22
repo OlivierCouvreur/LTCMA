@@ -97,8 +97,6 @@ Author:
 
 """
 
-# SAA Portfolio Monte Carlo Simulator
-# ===================================
 
 import streamlit as st
 import pandas as pd
@@ -107,6 +105,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
+from plotly import graph_objects as go
 from io import BytesIO
 from scipy.optimize import minimize
 from scipy.stats import t
@@ -117,21 +116,82 @@ import hashlib, hmac, binascii
 from base64 import b64encode
 import time
 from urllib.parse import quote_plus
+from collections.abc import Mapping
+import pyotp
+import json, secrets, re
+import uuid, datetime as dt
+from urllib.parse import quote as urlquote
+
+AUTH_STORE_PATH = "Data/auth_store.json"
 
 
-
-APP_VERSION = "v7.1.1 PW"
+APP_VERSION = "v8.0.1"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
 DEFAULT_CORR_PATH = "Data/Correlation Matrix.xlsx"
 DEFAULT_SCENARIO_PATH = "Data/Scenarios.xlsx"
 
-# NEW: baseline bundle to load via the "Restore" button
 DEFAULT_BASELINE_SESSION_PATH = "Data/baseline_session.pkl" 
 DEFAULT_BASELINE_SCENARIO_PATH = "Data/Scenarios.xlsx"
 
-# Ensure the correlation matrix has the proper shape
+# --- Admin & reset helpers ---
+
+DATA_DIR = Path("Data")
+RESET_REQUESTS_PATH = DATA_DIR / "pw_reset_requests.json"
+
+def _json_load(path: Path) -> dict:
+    try: return json.loads(path.read_text())
+    except Exception: return {}
+
+def _json_save(path: Path, obj: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, indent=2))
+
+def add_reset_request(username: str) -> str:
+    """Create/overwrite a reset request for username; returns a short admin token."""
+    db = _json_load(RESET_REQUESTS_PATH)
+    token = secrets.token_urlsafe(12)
+    db[username] = {"ts": int(time.time()), "token": token}
+    _json_save(RESET_REQUESTS_PATH, db)
+    return token
+
+def pop_reset_request(username: str):
+    """Consume & remove a reset request if present."""
+    db = _json_load(RESET_REQUESTS_PATH)
+    rec = db.pop(username, None)
+    _json_save(RESET_REQUESTS_PATH, db)
+    return rec
+
+def list_reset_requests() -> dict:
+    return _json_load(RESET_REQUESTS_PATH)
+
+def pbkdf2_make(password: str, salt_hex: str | None = None, iterations: int = 150_000) -> tuple[str, str, int]:
+    """Produce (salt_hex, hash_hex, iterations) for storage in secrets.toml."""
+    if not salt_hex:
+        salt_hex = secrets.token_hex(16)   # 16 bytes -> 32 hex chars
+    salt = bytes.fromhex(salt_hex)
+    dk = hashlib.pbkdf2_hmac("sha256", (password or "").encode("utf-8"), salt, iterations)
+    return salt_hex, dk.hex(), iterations
+
+def new_totp_secret() -> str:
+    return pyotp.random_base32()
+
+def totp_provisioning_uri(username: str, secret: str, issuer: str = "SAA App") -> str:
+    return pyotp.TOTP(secret).provisioning_uri(name=username, issuer_name=issuer)
+
+def toml_user_block(username: str, salt_hex: str, hash_hex: str, iterations: int, role: str, totp_secret: str) -> str:
+    # Keep EXACT quoting/format to avoid TOML parse errors
+    return (
+        f'[auth.users.{username}]\n'
+        f'salt = "{salt_hex}"\n'
+        f'hash = "{hash_hex}"\n'
+        f'iterations = {iterations}\n'
+        f'role = "{role}"\n'
+        f'totp_secret = "{totp_secret}"\n'
+    )
+
+
 def ensure_corr_shape(assets: pd.Index, corr_df: pd.DataFrame | None) -> pd.DataFrame:
     if corr_df is None or getattr(corr_df, "empty", True):
         return pd.DataFrame(np.eye(len(assets)), index=assets, columns=assets)
@@ -149,8 +209,6 @@ def require_cap(flag: str):
 st.set_page_config(layout="wide")
 st.title("Portfolio Analytics")
 
-# v6.3 Helpers for avoiding hard resets BEGIN
-# --- Session-safe navigation state ---
 if "view" not in st.session_state:
     st.session_state["view"] = "home"
 
@@ -160,29 +218,25 @@ def get_view_param(default: str = "home") -> str:
 def set_view_param(view: str):
     st.session_state["view"] = view
     try:
-        # modern API: in-place update, preserves other params (including auth_*)
         st.query_params["view"] = view
     except Exception:
-        # fallback: recompose full query preserving auth_*
         qp = st.experimental_get_query_params()
         qp = {k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}
         qp["view"] = view
         st.experimental_set_query_params(**qp)
 
-
-# --- keep URL and session in sync (so <a href="?view=..."> works) ---
 def _get_view_from_query():
     try:
-        v = st.query_params.get("view", None)          # Streamlit >=1.30
+        v = st.query_params.get("view", None)
     except Exception:
-        v = st.experimental_get_query_params().get("view", [None])  # older Streamlit
+        v = st.experimental_get_query_params().get("view", [None])
         v = v[0] if isinstance(v, list) and v else None
     return v
 
 _qv = _get_view_from_query()
 if _qv is not None:  # accept "home", "sim", etc.
     st.session_state["view"] = _qv
-# --------------------------------------------------------------------
+
 
 def _get_qp_single(key: str):
     try:
@@ -192,6 +246,7 @@ def _get_qp_single(key: str):
         qp = st.experimental_get_query_params()
         v = qp.get(key, [None])
         return v[0] if isinstance(v, list) and v else None
+
 
 def apply_sim_overrides_from_query():
     sd = _get_qp_single("sd")
@@ -224,37 +279,25 @@ def apply_sim_overrides_from_query():
     if uopt is not None:
         st.session_state["use_optimized_weights"] = (uopt in ("1","true","True","yes","y"))
 
-    # NEW: keep the viewer’s scenario selection when navigating  v6.12
     scen = _get_qp_single("scen")
     if scen:
         st.session_state["viewer_scenario_select"] = scen
         
-
-# IMPORTANT: run this BEFORE any baseline auto-load logic
 if not st.session_state.get("_qp_applied_once", False):
     apply_sim_overrides_from_query()
     st.session_state["_qp_applied_once"] = True
 
 
-
-# v6.11 Helpers for default data BEGIN
 def apply_session_dict(session_data: dict, *, overwrite_params: bool = False):
     """Apply a session dict (ltcma_df, corr_matrix, sim_params, optimized_weights) into state."""
     assert "ltcma_df" in session_data and "sim_params" in session_data, "Invalid session file"
-
     st.session_state["ltcma_base_default"] = session_data["ltcma_df"].copy()
     st.session_state["corr_store"] = session_data["corr_matrix"].copy()
     st.session_state["corr_assets"] = tuple(session_data["ltcma_df"].index.tolist())
-
-    # force editors to rebuild using the restored data
     st.session_state.pop("ltcma_widget", None)
     st.session_state.pop("corr_widget", None)
-
-    # clear derived outputs
     for k in ["portfolio_paths", "x_axis", "optimized_weights", "prev_ltcma_df", "prev_corr_df"]:
         st.session_state.pop(k, None)
-
-    # restore parameters
     sim_params = session_data.get("sim_params", {})
     for param_key, param_value in sim_params.items():
         if overwrite_params:
@@ -262,11 +305,8 @@ def apply_session_dict(session_data: dict, *, overwrite_params: bool = False):
         else:
             if param_key not in st.session_state:
                 st.session_state[param_key] = param_value
-
-    # restore optimized weights if present
     if session_data.get("optimized_weights") is not None:
         st.session_state["optimized_weights"] = session_data["optimized_weights"].copy()
-
 
 
 def load_baseline_session_and_scenarios(*, overwrite_params: bool = True):
@@ -274,17 +314,11 @@ def load_baseline_session_and_scenarios(*, overwrite_params: bool = True):
     try:
         with open(DEFAULT_BASELINE_SESSION_PATH, "rb") as f:
             session_data = pickle.load(f)
-
-        # <- Respect the flag here
         apply_session_dict(session_data, overwrite_params=overwrite_params)
-
         scen_df = pd.read_excel(DEFAULT_BASELINE_SCENARIO_PATH)
         st.session_state["default_scenarios_df"] = scen_df.copy()
-
-        # Only freeze URL overrides after an explicit reset
         if overwrite_params:
             st.session_state["_qp_applied_once"] = True
-
         st.success("Baseline session and scenarios loaded.")
         st.rerun()
     except FileNotFoundError as e:
@@ -294,14 +328,6 @@ def load_baseline_session_and_scenarios(*, overwrite_params: bool = True):
     except Exception as e:
         st.error(f"Failed to load baseline: {e}")
 
-# v6.11 Helpers for default data END
-
-# v6.3 Helpers for avoiding hard resets BEGIN
-
-# v6.0 Helpers for images   BEGIN
-
-
-# ===== Viewer portal helpers =====
 
 def load_image_b64(path: str) -> str:
     try:
@@ -312,14 +338,9 @@ def load_image_b64(path: str) -> str:
         return "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAMAASsJTYQAAAAASUVORK5CYII="
 
 
-
-# v6.8 ADDITION BEGIN
-
 def image_tile(label: str, img_path: str, target_view: str, height_px: int = 220):
     img_b64 = load_image_b64(img_path)
-    qs = auth_query_suffix()  # keep auth tokens
-
-    # Build query params from the current sidebar/session values
+    qs = auth_query_suffix()
     sd = st.session_state.get("start_date")
     try:
         sd_str = pd.to_datetime(sd).date().isoformat()
@@ -331,13 +352,9 @@ def image_tile(label: str, img_path: str, target_view: str, height_px: int = 220
     iv   = st.session_state.get("initial_value")
     ns   = st.session_state.get("n_sims")
     uopt = 1 if st.session_state.get("use_optimized_weights") else 0
-
-    # NEW: include the current viewer scenario (if any) in the URL
     scen_sel = st.session_state.get("viewer_scenario_select")
     scen_q = f"&scen={quote_plus(str(scen_sel))}" if scen_sel else ""
-    
-    # extra = f"&sd={sd_str}&yrs={yrs}&freq={freq}&iv={iv}&ns={ns}&uopt={uopt}"
-    extra = f"&sd={sd_str}&yrs={yrs}&freq={freq}&iv={iv}&ns={ns}&uopt={uopt}{scen_q}"       #v6.12
+    extra = f"&sd={sd_str}&yrs={yrs}&freq={freq}&iv={iv}&ns={ns}&uopt={uopt}{scen_q}"
 
     st.markdown(
         f"""
@@ -369,13 +386,9 @@ def image_tile(label: str, img_path: str, target_view: str, height_px: int = 220
     )
 
 
-# v6.8 ADDITION END
-
-
 def viewer_back_link():
-    # Proper Streamlit button → stays in same tab and preserves auth_* via set_view_param
     if st.button("◀ Back to menu", key="back_to_menu_btn"):
-        set_view_param("home")  # updates ?view=home while preserving existing query params
+        set_view_param("home")
         st.rerun()
 
 
@@ -403,79 +416,93 @@ def render_logo_top_right(img_path: str, height_px: int = 42):
         unsafe_allow_html=True,
     )
 
-# v6.0 Helpers for images   END
 
-
-
-
-# v6.10 Helpers for Chart BEGIN
 def center_plot(fig, ratio=(1, 4, 1), figsize=(7, 4)):
     if figsize:
-        fig.set_size_inches(*figsize)  # Matplotlib size (optional)
+        fig.set_size_inches(*figsize)
     left, mid, right = st.columns(ratio)
     with mid:
-        st.pyplot(fig)  # no use_container_width; no width="stretch"
+        st.pyplot(fig)
 
-# v6.10 Helpers for Chart
-
-
-
-
-#v5.4  Users/Password
-from collections.abc import Mapping
 
 def get_user_record(username: str):
-    auth = st.secrets.get("auth", {})
-    users_raw = auth.get("users", {})
-    # Coerce to a plain dict if possible; otherwise accept any Mapping
-    if isinstance(users_raw, Mapping):
-        users = dict(users_raw)
-    else:
-        users = users_raw  # last resort; still try to use it
     uname = (username or "").strip().lower()
+    # 1) Writable JSON overrides
+    store = _load_auth_store()
+    rec = (store.get("users", {}) or {}).get(uname)
+    if rec:
+        return rec
+    # 2) Fall back to secrets.toml
+    auth = st.secrets.get("auth", {})
+    users = dict(auth.get("users", {}))
     return users.get(uname)
+
 
 def verify_password_pbkdf2(username: str, password: str) -> bool:
     rec = get_user_record(username)
     if not rec:
         st.warning("User not found.")
         return False
+
+    def _clean_hex(s: str) -> str:
+        # remove spaces, zero-width chars, BOMs, and optional "0x" prefix
+        return (
+            str(s)
+            .strip()
+            .replace(" ", "")
+            .replace("\u200b", "")
+            .replace("\ufeff", "")
+            .lower()
+            .removeprefix("0x")
+        )
+
     try:
-        salt_hex = rec["salt"].strip()
-        hash_hex = rec["hash"].strip().lower()
-        iterations = int(rec.get("iterations", 150_000))
-        # sanity checks
-        if len(salt_hex) % 2 != 0 or len(hash_hex) != 64:
-            st.error("Secrets format looks off (salt must be hex; hash must be 64-char hex for sha256).")
-            return False
-        salt = bytes.fromhex(salt_hex)
+        salt_hex = _clean_hex(rec["salt"])
+        hash_hex = _clean_hex(rec["hash"])
+        salt = bytes.fromhex(salt_hex)              # parse, don't pre-judge length
         expected = bytes.fromhex(hash_hex)
-        dk = hashlib.pbkdf2_hmac("sha256", (password or "").encode("utf-8"), salt, iterations)
-        return hmac.compare_digest(dk, expected)
-    except KeyError as e:
-        st.error(f"Missing field in secrets: {e}")
-        return False
-    except binascii.Error:
-        st.error("Salt/hash are not valid hex. Regenerate them.")
-        return False
+        iterations = int(rec.get("iterations", 150_000))
     except Exception as e:
-        st.error(f"Auth error: {e}")
+        st.error(f"Secrets format looks off: {e}")
+        return False
+
+    # PBKDF2-HMAC-SHA256 yields 32 bytes; enforce that with a clearer message
+    if len(expected) != 32:
+        st.error(f"Hash must be 64 hex chars (got {len(hash_hex)}).")
+        return False
+
+    dk = hashlib.pbkdf2_hmac("sha256", (password or "").encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(dk, expected)
+
+
+REQUIRE_2FA = bool(st.secrets.get("auth", {}).get("require_2fa", True))
+
+def verify_totp(username: str, code: str) -> bool:
+    """Verify a 6-digit TOTP code for the given user."""
+    rec = get_user_record(username)
+    if not rec:
+        return False
+    secret = (rec.get("totp_secret") or "").strip()
+    if not secret:
+        # If 2FA is required globally but user has no secret, do not allow bypass.
+        return not REQUIRE_2FA
+    try:
+        totp = pyotp.TOTP(secret)
+        # Accept codes in neighboring step to be tolerant of slight clock drift
+        code_digits = "".join(ch for ch in str(code) if ch.isdigit())
+        return bool(totp.verify(code_digits, valid_window=1))
+    except Exception:
         return False
 
 
-
-# ---- Auto-login token helpers (place right below verify_password_pbkdf2) ----
 def _auth_signing_key() -> bytes:
-    # Add secrets.auth.signing_key in .streamlit/secrets.toml (a long random string),
-    # or a dev fallback is used.
     return (st.secrets.get("auth", {}).get("signing_key") or "dev-signing-key").encode("utf-8")
 
 def _sign_token(s: str) -> str:
     return hmac.new(_auth_signing_key(), s.encode("utf-8"), hashlib.sha256).hexdigest()
 
 def _get_qp(key: str):
-    # robustly read a single query param as a string (works with old/new Streamlit)
-    try:  # Streamlit >= 1.30
+    try:
         val = st.query_params.get(key, None)
         return val if isinstance(val, str) else (val[0] if isinstance(val, list) and val else None)
     except Exception:
@@ -506,19 +533,19 @@ def try_autologin_from_query() -> bool:
     st.session_state.auth = {"ok": True, "user": u, "role": rec.get("role", "user")}
     return True
 
+
 def issue_autologin_token(username: str, ttl_seconds: int = 8 * 3600):
     exp = int(time.time()) + ttl_seconds
     token = f"{username}|{exp}"
     sig = _sign_token(token)
     try:
-        # Modern API: mutate in place (preserves other params)
         st.query_params.update({"auth_user": username, "auth_exp": str(exp), "auth_sig": sig})
     except Exception:
-        # Fallback API: we must *preserve* existing params manually
         current = st.experimental_get_query_params()
         current = {k: (v[0] if isinstance(v, list) else v) for k, v in current.items()}
         current.update({"auth_user": username, "auth_exp": str(exp), "auth_sig": sig})
         st.experimental_set_query_params(**current)
+
 
 def auth_query_suffix() -> str:
     """Return '&auth_user=...&auth_exp=...&auth_sig=...' if present, else ''.
@@ -527,97 +554,531 @@ def auth_query_suffix() -> str:
     u, e, s = _get_qp("auth_user"), _get_qp("auth_exp"), _get_qp("auth_sig")
     if u and e and s:
         return f"&auth_user={u}&auth_exp={e}&auth_sig={s}"
-    # If we’re in an already-signed-in session but the URL lacks params (rare), try session:
     a = st.session_state.get("auth", {})
     if a and a.get("ok") and a.get("user"):
-        # Not strictly necessary; links without token will still work as long as there’s no hard reload.
         return ""
     return ""
-# ---- End helpers ----
+
+
+def _load_auth_store() -> dict:
+    p = Path(AUTH_STORE_PATH)
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+def _save_auth_store(store: dict) -> bool:
+    try:
+        p = Path(AUTH_STORE_PATH)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(store, indent=2), encoding="utf-8")
+        tmp.replace(p)
+        return True
+    except Exception as e:
+        st.error(f"Failed to write auth store: {e}")
+        return False
+
+
+def _pbkdf2_hash(password: str, *, salt_hex: str | None = None, iterations: int = 150_000):
+    salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return salt.hex(), dk.hex(), iterations
+
+def _password_is_strong(pw: str) -> tuple[bool, str]:
+    if len(pw) < 10:
+        return False, "Must be at least 10 characters."
+    classes = sum(bool(re.search(r, pw)) for r in [r"[a-z]", r"[A-Z]", r"\d", r"[^A-Za-z0-9]"])
+    if classes < 3:
+        return False, "Use at least three of: lowercase, uppercase, number, symbol."
+    return True, ""
+
+def set_user_password(username: str, new_password: str) -> bool:
+    uname = (username or "").strip().lower()
+    rec = get_user_record(uname)
+    if not rec:
+        st.error("User not found.")
+        return False
+
+    ok, msg = _password_is_strong(new_password)
+    if not ok:
+        st.error(msg)
+        return False
+
+    iterations = int(rec.get("iterations", 150_000))
+    salt_hex, hash_hex, iterations = _pbkdf2_hash(new_password, iterations=iterations)
+
+    # merge with existing fields so we keep role / totp_secret / etc.
+    new_rec = dict(rec)
+    new_rec.update({"salt": salt_hex, "hash": hash_hex, "iterations": iterations, "must_change": False})
+
+    store = _load_auth_store()
+    users = store.setdefault("users", {})
+    users[uname] = new_rec
+    return _save_auth_store(store)
+
+def _read_tabular_file(uploaded_file: "UploadedFile") -> pd.DataFrame:
+    name = (uploaded_file.name or "").lower()
+    if name.endswith(".csv"):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file)
+    return df
+
+def _find_date_and_value_cols(df: pd.DataFrame) -> tuple[str, str, str]:
+    """
+    Return (date_col, numeric_col, kind) where kind in {"value","return"}.
+    - If a column name contains 'return', treat as returns (fraction or %).
+    - Otherwise use the first numeric column as 'value'.
+    """
+    cols = [c for c in df.columns if str(c).strip() != ""]
+    # pick date-like col (prefer 'date' names)
+    date_candidates = [c for c in cols if "date" in str(c).lower()]
+    date_col = date_candidates[0] if date_candidates else cols[0]
+
+    # numeric candidates
+    num_cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])]
+    if not num_cols:
+        # try to coerce all but date to numeric
+        for c in cols:
+            if c == date_col: 
+                continue
+            try:
+                pd.to_numeric(df[c])
+                num_cols.append(c)
+            except Exception:
+                pass
+    if not num_cols:
+        raise ValueError("No numeric column found for values/returns.")
+
+    # prefer 'return' if present
+    ret_cols = [c for c in num_cols if "return" in str(c).lower()]
+    if ret_cols:
+        return date_col, ret_cols[0], "return"
+    else:
+        return date_col, num_cols[0], "value"
+
+def parse_actual_upload(uploaded_file) -> dict:
+    """
+    Returns a dict with:
+      - 'base1': pd.Series indexed by datetime, normalized to base 1.0
+      - 'first_value': original first numeric level (if kind='value'), else 1.0 for returns
+      - 'kind': 'value' or 'return'
+      - 'start_end': (start_date, end_date)
+    """
+    df = _read_tabular_file(uploaded_file)
+    date_col, num_col, kind = _find_date_and_value_cols(df)
+
+    out = df[[date_col, num_col]].dropna()
+    out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
+    out = out.dropna(subset=[date_col]).sort_values(date_col)
+    out = out.set_index(date_col)
+
+    series = pd.to_numeric(out[num_col], errors="coerce").dropna()
+
+    if kind == "return":
+        # returns may be in %, detect and convert if needed
+        med = series.abs().median()
+        if med > 0.5:   # probably given in %
+            series = series / 100.0
+        base1 = (1.0 + series).cumprod()
+        first_value = 1.0
+    else:
+        # level series -> normalize to base 1.0
+        first_value = float(series.iloc[0])
+        base1 = series / first_value
+
+    base1.name = "Actual (base=1)"
+    return {
+        "base1": base1,
+        "first_value": first_value,
+        "kind": kind,
+        "start_end": (base1.index.min(), base1.index.max()),
+    }
+
+def _resample_to_sim_freq(s: pd.Series, frequency: str) -> pd.Series:
+    """Resample to month/quarter/year end."""
+    freq_map = {"monthly": "ME", "quarterly": "QE", "yearly": "YE"}
+    freq = freq_map.get(frequency, "M")
+    try:
+        return s.resample(freq).last().dropna()
+    except Exception:
+        return s
 
 
 
-# ---- Auth gate (multi-user, hashed) ----  V6.4
-AUTH_REQUIRED = bool(st.secrets.get("auth", {}).get("require", False))
+# @st.cache_data  # cache suggested by Claude, try without it
+def compute_drawdown_stats_vectorized(portfolio_paths_tuple):
+    """Vectorized drawdown calculation - much faster"""
+    portfolio_paths = np.array(portfolio_paths_tuple)
+    n_steps, n_sims = portfolio_paths.shape
+    
+    # Calcul vectorisé des peaks cumulatifs
+    cummax = np.maximum.accumulate(portfolio_paths, axis=0)
+    
+    # Drawdowns pour chaque pas de temps
+    drawdowns = 1.0 - portfolio_paths / cummax
+    
+    # Max drawdown par simulation
+    max_drawdowns = drawdowns.max(axis=0).tolist()
+    
+    # Recovery times (plus complexe, garde une boucle légère)
+    recovery_times = []
+    for sim in range(n_sims):
+        path = portfolio_paths[:, sim]
+        dd = drawdowns[:, sim]
+        max_dd_idx = dd.argmax()
+        
+        # Find when it recovers
+        peak_at_max_dd = cummax[max_dd_idx, sim]
+        recovery_idx = np.where(path[max_dd_idx:] >= peak_at_max_dd)[0]
+        
+        if len(recovery_idx) > 0:
+            recovery_times.append(float(recovery_idx[0]))
+        else:
+            recovery_times.append(np.nan)
+    
+    return max_drawdowns, recovery_times
 
-#if AUTH_REQUIRED:
-#    if "auth" not in st.session_state:
-#        st.session_state.auth = {"ok": False, "user": None, "role": None}
-
-    # ← try to restore auth from URL on any reload
-#    if not st.session_state.auth["ok"]:
-#        try_autologin_from_query()
 
 
 
 
-# ---- Auth gate (multi-user, hashed) ----
+
 AUTH_REQUIRED = bool(st.secrets.get("auth", {}).get("require", False))
 
 if AUTH_REQUIRED:
     if "auth" not in st.session_state:
         st.session_state.auth = {"ok": False, "user": None, "role": None}
 
-    # Try URL-based autologin first (no UI if it succeeds)
     if not st.session_state.auth["ok"]:
+        try_autologin_from_query()
+
+
+    if not st.session_state.auth["ok"]:
+        # restore from URL if possible (keeps your existing behavior)
         try_autologin_from_query()
 
     if not st.session_state.auth["ok"]:
         st.subheader("Restricted access")
-        colU, colP = st.columns([1, 1])
-        with colU:
-            username = st.text_input("Username").strip().lower()
-        with colP:
-            password = st.text_input("Password", type="password")
 
-        btn = st.button("Sign in")
-        if btn:
-            if verify_password_pbkdf2(username, password):
-                rec = get_user_record(username)
-                role = rec.get("role", "user")
-                st.session_state.auth = {"ok": True, "user": username, "role": role}
+        # Which screen are we on? 'login' (user+pass) or '2fa' (one-time code)
+        stage = st.session_state.setdefault("auth_stage", "login")
 
-                # NEW: if analyst or viewer, mark that we want to auto-load baseline on the next run
-                if role in ("analyst", "viewer"):
-                    st.session_state["_auto_baseline_after_login"] = True
 
-                issue_autologin_token(username)
+        if stage == "login":
+            colU, colP = st.columns([1, 1])
+            with colU:
+                username = st.text_input("Username", key="login_username").strip().lower()
+            with colP:
+                password = st.text_input("Password", type="password", key="login_password")
+
+            trust_device = st.checkbox("Trust this device", value=True,
+                                   help="Keeps you signed in with a secure token.")
+
+            if st.button("Sign in"):
+
+
+                if verify_password_pbkdf2(username, password):
+                    rec = get_user_record(username)
+                    has_totp = bool(rec and rec.get("totp_secret"))
+                    need_2fa = REQUIRE_2FA and has_totp  # only require 2FA if globally on AND the user has a secret
+
+                    if REQUIRE_2FA and not has_totp:
+                        st.error("2FA is required but not configured for this account. Ask an admin to add a TOTP secret.")
+                        st.stop()
+
+                    if not need_2fa:
+                        # finish login immediately (password-only path)
+                        role = rec.get("role", "user")
+                        st.session_state.auth = {"ok": True, "user": username, "role": role}
+
+                        # auto-load baseline for analyst/viewer (keep your behavior)
+                        if role in ("analyst", "viewer"):
+                            st.session_state["_auto_baseline_after_login"] = True
+
+                        ttl = (7 * 24 * 3600) if trust_device else (8 * 3600)
+                        issue_autologin_token(username, ttl_seconds=ttl)
+                        st.rerun()
+                    else:
+                        # proceed to 2FA screen
+                        st.session_state["pending_user"] = username
+                        st.session_state["pending_ttl"] = (7 * 24 * 3600) if trust_device else (8 * 3600)
+                        st.session_state["auth_stage"] = "2fa"
+                        st.rerun()
+
+
+
+
+
+
+
+
+
+
+            # under the login form, add:
+            forgot_col, _ = st.columns([1, 3])
+            with forgot_col:
+                if st.button("Forgot password?"):
+                    st.session_state["auth_stage"] = "forgot"
+                    st.rerun()
+
+
+            st.stop()
+
+        elif stage == "2fa":
+            pending_user = st.session_state.get("pending_user")
+            if not pending_user:
+                # Safety fallback
+                st.session_state["auth_stage"] = "login"
                 st.rerun()
-            else:
-                st.error("Invalid username or password.")
-                
-        st.stop()  # Block the rest of the app until signed in
+
+            st.write(f"User: **{pending_user}**")
+            totp_code = st.text_input("Authenticator code", type="password", max_chars=8, key="totp_input")
+
+            colA, colB = st.columns([1, 1])
+            with colA:
+                if st.button("Verify code"):
+                    if verify_totp(pending_user, totp_code):
+                        rec = get_user_record(pending_user)
+                        role = rec.get("role", "user")
+                        st.session_state.auth = {"ok": True, "user": pending_user, "role": role}
+
+                        # auto-load baseline for analyst/viewer
+                        if role in ("analyst", "viewer"):
+                            st.session_state["_auto_baseline_after_login"] = True
+
+                        # finalize token
+                        ttl = int(st.session_state.get("pending_ttl", 8 * 3600))
+                        issue_autologin_token(pending_user, ttl_seconds=ttl)
+
+                        # clean up stage state
+                        st.session_state.pop("pending_user", None)
+                        st.session_state.pop("pending_ttl", None)
+                        st.session_state.pop("auth_stage", None)
+
+                        # after successful TOTP verify, before final st.rerun()
+                        rec = get_user_record(pending_user)
+                        if rec.get("must_change"):
+                            # park the user in a temporary stage to set a new password
+                            st.session_state["auth_stage"] = "pwreset"
+                            st.session_state["pending_user"] = pending_user
+                            st.stop()
+                        
+                        st.rerun()
+                    else:
+                        st.error("Invalid or expired code. Please try again.")
+
+            with colB:
+                if st.button("Back"):
+                    st.session_state["auth_stage"] = "login"
+                    st.session_state.pop("pending_user", None)
+                    st.session_state.pop("pending_ttl", None)
+                    st.rerun()
+
+            st.stop()
+
+        
+        elif stage == "pwreset":
+            pending_user = st.session_state.get("pending_user")
+            st.subheader("Set a new password")
+            with st.form("forced_pw_reset", clear_on_submit=True):
+                new1 = st.text_input("New password", type="password")
+                new2 = st.text_input("Confirm new password", type="password")
+                submit = st.form_submit_button("Save new password")
+            if submit:
+                if new1 != new2:
+                    st.error("Passwords do not match.")
+                else:
+                    if set_user_password(pending_user, new1):
+                        # finish sign-in like normal
+                        rec = get_user_record(pending_user)
+                        role = rec.get("role", "user")
+                        st.session_state.auth = {"ok": True, "user": pending_user, "role": role}
+                        issue_autologin_token(pending_user, ttl_seconds=int(st.session_state.get("pending_ttl", 8 * 3600)))
+                        st.session_state.pop("pending_user", None)
+                        st.session_state.pop("pending_ttl", None)
+                        st.session_state.pop("auth_stage", None)
+                        st.success("Password updated.")
+                        st.rerun()
+        
+
+        elif stage == "forgot":
+            st.write("Reset your password")
+            uname = st.text_input("Username", key="forgot_user").strip().lower()
+            if st.button("Request reset"):
+                if get_user_record(uname):
+                    token = add_reset_request(uname)
+                    st.success("Request recorded. Please contact an admin to finalize your reset.")
+                    # Show a short token the admin will see in their panel
+                    st.caption("Give this token to your admin (or they’ll see it in the panel):")
+                    st.code(token, language="text")
+                else:
+                    st.error("Unknown username.")
+            if st.button("Back to sign in"):
+                st.session_state["auth_stage"] = "login"
+                st.rerun()
+            st.stop()
+
+        
 
 
     if st.session_state.pop("_auto_baseline_after_login", False):
-        # Load the baseline .pkl + scenarios for non-admins, then hard refresh
         load_baseline_session_and_scenarios(overwrite_params=True)
         st.stop()
-
-
-    # --- NEW: safety net for auto-login / hard refresh ---
 
     if st.session_state.auth.get("role") in ("analyst", "viewer") \
        and "ltcma_base_default" not in st.session_state \
        and not st.session_state.get("_baseline_attempted", False):
         st.session_state["_baseline_attempted"] = True
-        # IMPORTANT: don't overwrite current (possibly URL) params
         load_baseline_session_and_scenarios(overwrite_params=False)
         st.stop()
 
-
-
-    # Signed in → small status + sign out in sidebar
     st.sidebar.success(f"Signed in as {st.session_state.auth['user']} ({st.session_state.auth['role']})")
+
+    # after: st.sidebar.success(f"Signed in as ...")
+    with st.sidebar.expander("Account"):
+        st.markdown("**Change password**")
+        with st.form("change_pw_form", clear_on_submit=True):
+            curr = st.text_input("Current password", type="password")
+            new1 = st.text_input("New password", type="password")
+            new2 = st.text_input("Confirm new password", type="password")
+            submit = st.form_submit_button("Update password")
+
+        if submit:
+            user = st.session_state.auth["user"]
+            if not verify_password_pbkdf2(user, curr):
+                st.error("Current password is incorrect.")
+            elif new1 != new2:
+                st.error("New passwords do not match.")
+            else:
+                if set_user_password(user, new1):
+                    st.success("Password updated. It takes effect immediately.")
+
+    ROLE = (st.session_state.auth["role"] if AUTH_REQUIRED else "admin")
+    if ROLE == "admin":
+        with st.sidebar.expander("Admin • Users"):
+            target = st.text_input("Username to force reset", key="force_reset_user")
+            if st.button("Require password change"):
+                store = _load_auth_store()
+                users = store.setdefault("users", {})
+                rec = users.get(target.strip().lower()) or get_user_record(target)
+                if not rec:
+                    st.error("User not found in store or secrets.")
+                else:
+                    # write to store (so it becomes writable/overridable)
+                    out = dict(rec); out["must_change"] = True
+                    users[target.strip().lower()] = out
+                    if _save_auth_store(store):
+                        st.success("User will be required to set a new password on next sign-in.")
+
+
+    # --- Admin: Users & Roles ---
+    if ROLE == "admin":
+        with st.sidebar.expander("Admin: Users & Roles", expanded=False):
+
+            # 3.1 Create user
+            st.markdown("**Create user**")
+            cu1, cu2 = st.columns([1, 1])
+            with cu1:
+                new_username = st.text_input("Username (lowercase)", key="adm_new_user").strip().lower()
+            with cu2:
+                new_role = st.selectbox("Role", ["admin", "analyst", "viewer"], key="adm_new_role")
+
+            tmp_pw = st.text_input("Temporary password", type="password", key="adm_new_tmp_pw")
+            regen2fa = st.checkbox("Generate 2FA secret (recommended)", value=True, key="adm_new_2fa")
+
+            if st.button("Generate user TOML"):
+                if not new_username or not tmp_pw:
+                    st.warning("Username and temporary password required.")
+                else:
+                    salt_hex, hash_hex, iters = pbkdf2_make(tmp_pw)
+                    totp_secret = new_totp_secret() if regen2fa else (get_user_record(new_username) or {}).get("totp_secret", "") or new_totp_secret()
+                    uri = totp_provisioning_uri(new_username, totp_secret, issuer="SAA App")
+                    block = toml_user_block(new_username, salt_hex, hash_hex, iters, new_role, totp_secret)
+    
+                    st.success("Paste this block into your secrets.toml (exactly):")
+                    st.code(block, language="toml")
+
+                    # Optional QR via Google Charts (note: requests an external image)
+                    qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={urlquote(uri)}"
+                    st.markdown(f"**TOTP secret:** `{totp_secret}`")
+                    st.markdown(f"[Provisioning URI]({uri})")
+                    st.image(qr_url, caption="Scan in Microsoft Authenticator / Google Authenticator")
+
+            st.divider()
+
+            # 3.2 Change role of an existing user
+            st.markdown("**Change user role**")
+            all_users = sorted((st.secrets.get("auth", {}).get("users", {}) or {}).keys())
+            sel_user = st.selectbox("User", all_users, key="adm_role_user") if all_users else None
+            new_role2 = st.selectbox("New role", ["admin", "analyst", "viewer"], key="adm_role_role")
+            if st.button("Generate role update TOML", disabled=not sel_user):
+                rec = get_user_record(sel_user)
+                if not rec:
+                    st.error("User not found in secrets.")
+                else:
+                    block = toml_user_block(
+                        sel_user,
+                        rec["salt"].strip(),
+                        rec["hash"].strip(),
+                        int(rec.get("iterations", 150_000)),
+                        new_role2,
+                        (rec.get("totp_secret") or "").strip()
+                    )
+                    st.success("Paste this block (role updated) into secrets.toml:")
+                    st.code(block, language="toml")
+
+            st.divider()
+
+            # 3.3 Service password reset requests
+            st.markdown("**Password reset requests**")
+            reqs = list_reset_requests()
+            if not reqs:
+                st.caption("No pending requests.")
+            else:
+                # pick first or choose one
+                user_reset = st.selectbox("Pending user", sorted(reqs.keys()), key="adm_reset_user")
+                token_shown = reqs.get(user_reset, {}).get("token", "")
+                st.caption(f"Verification token for this request: `{token_shown}`")
+
+                new_tmp_pw = st.text_input("New temporary password", type="password", key="adm_reset_tmp_pw")
+                reset_2fa = st.checkbox("Reset 2FA (user lost authenticator)", value=False, key="adm_reset_re2fa")
+
+                if st.button("Generate reset TOML", disabled=not user_reset):
+                    rec = get_user_record(user_reset)
+                    if not rec:
+                        st.error("User not found in secrets.")
+                    elif not new_tmp_pw:
+                        st.error("Enter a temporary password.")
+                    else:
+                        salt_hex, hash_hex, iters = pbkdf2_make(new_tmp_pw)
+                        totp_secret = new_totp_secret() if reset_2fa else (rec.get("totp_secret") or new_totp_secret())
+                        uri = totp_provisioning_uri(user_reset, totp_secret, issuer="SAA App")
+                        block = toml_user_block(user_reset, salt_hex, hash_hex, iters, rec.get("role", "viewer"), totp_secret)
+
+                        st.success("Paste this block into secrets.toml to complete the reset:")
+                        st.code(block, language="toml")
+                        st.markdown(f"**TOTP secret:** `{totp_secret}`")
+                        st.markdown(f"[Provisioning URI]({uri})")
+                        qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={urlquote(uri)}"
+                        st.image(qr_url, caption="Scan in authenticator")
+    
+                        # mark the request as done
+                        pop_reset_request(user_reset)
+
+
+
+
 
     if st.sidebar.button("Sign out"):
         curr_view = st.session_state.get("view", "home")
         st.session_state.pop("auth", None)
         try:
-            # modern API: remove auth_* and keep view
             st.query_params.update({"auth_user": None, "auth_exp": None, "auth_sig": None, "view": curr_view})
         except Exception:
-            # fallback API: rebuild query string without auth_* but keep view
             qp = st.experimental_get_query_params()
             qp = {k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}
             qp.pop("auth_user", None); qp.pop("auth_exp", None); qp.pop("auth_sig", None)
@@ -625,7 +1086,6 @@ if AUTH_REQUIRED:
             st.experimental_set_query_params(**qp)
         st.rerun()
 
-# ---- End Auth gate ----
 
 ROLE = (st.session_state.auth["role"] if AUTH_REQUIRED else "admin")
 
@@ -636,23 +1096,10 @@ CAPS = {
 }
 cap = CAPS.get(ROLE, CAPS["viewer"])
 
-# st.sidebar.caption(f"Role: **{st.session_state.auth['role']}**")
 
 IS_VIEWER = (ROLE == "viewer")
-VIEW = get_view_param("home")  # optional; only needed if you reference VIEW before the later block
+VIEW = get_view_param("home")
 
-
-# show a back button on all viewer sub-views except the scenario screen (which has its own header)
-# if IS_VIEWER and view in ("sim", "ef", "stats"):
-#    viewer_back_link()
-
-
-#v5.4  Users/Password
-
-
-
-
-#v6.2 LOGO
 render_logo_top_right("Data/Logo.png", height_px=120)  # size of the logo
 
 
@@ -682,23 +1129,19 @@ for key, val in default_values.items():
 if "simulation_has_run" not in st.session_state:
     st.session_state.simulation_has_run = False
 
-# Additional defensive session state initialization
 if "portfolio_paths" not in st.session_state:
     st.session_state["portfolio_paths"] = None
 
 if "x_axis" not in st.session_state:
     st.session_state["x_axis"] = None
 
-# v4.3 ----------
 st.session_state.simulation_has_run = (
     st.session_state["portfolio_paths"] is not None
     and st.session_state["x_axis"] is not None
 )
-# v4.3 ----------
 
 
 def get_current_ltcma_and_corr_for_save() -> tuple[pd.DataFrame, pd.DataFrame]:
-    # Try most recent edited table, then base default, then disk, then a tiny inline fallback
     ltc = st.session_state.get("prev_ltcma_df")
     if ltc is None:
         ltc = st.session_state.get("ltcma_base_default")
@@ -714,23 +1157,19 @@ def get_current_ltcma_and_corr_for_save() -> tuple[pd.DataFrame, pd.DataFrame]:
                 "Max": [1.0, 1.0, 1.0]
             }, index=["Equities", "Bonds", "Alternatives"])
 
-    # light hygiene
     ltc = ltc.copy()
     ltc.index = ltc.index.astype(str).str.strip()
     ltc = ltc.loc[ltc.index != ""]
 
-    # Corr uses whatever is in the store, reshaped to match the LTCMA index
     corr = ensure_corr_shape(ltc.index, st.session_state.get("corr_store"))
     return ltc, corr
 
 
 
-#v6.13  Helper ADmin rights BEGIN
 def serialize_current_session_for_pickle() -> dict:
     """Build a baseline-ready payload from the current UI/session."""
     ltcma_current, corr_current = get_current_ltcma_and_corr_for_save()
 
-    # Align optimized weights to current assets if present
     opt = st.session_state.get("optimized_weights", None)
     if isinstance(opt, pd.Series):
         opt_to_save = opt.reindex(ltcma_current.index)
@@ -770,18 +1209,9 @@ def write_baseline_session_from_state(path: str = DEFAULT_BASELINE_SESSION_PATH)
         st.error(f"Failed to write baseline: {e}")
         return False
 
-#v6.13  Helper ADmin rights END
-
-
-
-# Sidebar Inputs referencing session_state directly
 st.sidebar.header("Simulation Parameters")
 
-
-
-# --- Session Management (role-aware) ---
 if IS_VIEWER:
-    # Viewers: just a single reset button, no section
     if st.sidebar.button(
         "↩️ Reset to baseline",
         key="reset_baseline_viewer",
@@ -790,7 +1220,6 @@ if IS_VIEWER:
     ):
         load_baseline_session_and_scenarios(overwrite_params=True)
 else:
-    # Admin/Analyst: full session tools in an expander
     with st.sidebar.expander("Session Management"):
         uploaded_session = st.file_uploader(
             "Reload Saved Session",
@@ -801,8 +1230,6 @@ else:
         with c1:
             if st.button("💾 Save Session", key="save_session_main"):
                 ltcma_current, corr_current = get_current_ltcma_and_corr_for_save()
-
-                # Make optimized_weights storable & aligned (Series or None)
                 opt = st.session_state.get("optimized_weights", None)
                 if isinstance(opt, pd.Series):
                     opt_to_save = opt.reindex(ltcma_current.index)
@@ -839,12 +1266,7 @@ else:
                 help="Load baseline .pkl session plus predefined scenarios"
             ):
                 load_baseline_session_and_scenarios(overwrite_params=True)
-
-
-
-        # v6.13 Admin Right to rewrite and save the baseline BEGIN
-        # --- Admin-only: make current settings the new baseline (.pkl) ---
-        
+       
         if ROLE == "admin":
             st.divider()
             st.markdown("#### Baseline (admin)")
@@ -856,16 +1278,9 @@ else:
             if st.button("Make current settings the baseline", disabled=not confirm_overwrite):
                 if write_baseline_session_from_state():
                     st.success("Baseline updated.")
-                    # Optional: immediately load what you just wrote
                     if st.button("Reload baseline now"):
                         load_baseline_session_and_scenarios(overwrite_params=True)
 
-        # v6.13 Admin Right to rewrite and save the baseline END
-
-
-
-
-        # Only process uploads for non-viewers
         if uploaded_session is not None and st.session_state.get("session_loaded") != uploaded_session.name:
             try:
                 session_data = pickle.load(uploaded_session)
@@ -892,33 +1307,22 @@ else:
                 st.error(f"Failed to reload session: {e}")
                 st.stop()
 
-# --- Session Management (role-aware) ---  END
-
-
-# UI Widgets using st.session_state
 
 start_date = st.sidebar.date_input(
     "Start Date",
-    #value=st.session_state["start_date"],  #v6.10
     key="start_date",
-    on_change=_invalidate_sim,        # <- NEW  v5.1
+    on_change=_invalidate_sim,
 )
 
 
 initial_value = st.sidebar.number_input(
     "Initial Portfolio Value",
-    #value=st.session_state["initial_value"],   #v6.10
     key="initial_value",
-    on_change=_invalidate_sim,   # v6.7
+    on_change=_invalidate_sim,
 )
 
-# v6.13 for Viewers BEGIN
-
-# Hide Frequency selector for viewers
 if IS_VIEWER:
-    # keep whatever is already in session (your defaults set it to "monthly")
     frequency = st.session_state.setdefault("frequency", "monthly")
-    # Optional line: show nothing by deleting the next line
     st.sidebar.caption(f"🔒 Frequency: **{frequency.capitalize()}** (fixed)")
 else:
     frequency = st.sidebar.selectbox(
@@ -928,37 +1332,24 @@ else:
         key="frequency",
         on_change=_invalidate_sim,
     )
-# v6.13 for Viewers END
-
-
-#initial_value = st.sidebar.number_input("Initial Portfolio Value", value=st.session_state["initial_value"], key="initial_value")
-#n_sims = st.sidebar.slider("Number of Simulations", 100, 5000, st.session_state["n_sims"], step=100, key="n_sims")
-
 
 n_years = st.sidebar.slider(
     "Investment Horizon (Years)",
     1, 30,
-    #st.session_state["n_years"],   #v6.10
     key="n_years",
-    on_change=_invalidate_sim,        # <- NEW  v5.1
+    on_change=_invalidate_sim,
 )
 
 n_sims = st.sidebar.slider(
     "Number of Simulations",
     100, 5000,
-    #st.session_state["n_sims"],    #v6.10
     step=100,
     key="n_sims",
-    on_change=_invalidate_sim,   # v6.7
+    on_change=_invalidate_sim,
 )
 
 
-
-# v6.11 hidding some elements of the Sidebar for VIEWERS - BEGIN
-
-# --- Optional Display Settings (role-aware) ---
 if IS_VIEWER:
-    # Show only the two toggles
     with st.sidebar.expander("Optional Display Settings"):
         show_double_initial = st.checkbox(
             "Show Double Initial Value",
@@ -970,15 +1361,12 @@ if IS_VIEWER:
             value=st.session_state.get("show_double_with_inflation", False),
             key="show_double_with_inflation",
         )
-
-    # Hidden defaults for the other options (still used by chart code)
     chart_engine  = st.session_state.setdefault("chart_engine", "Plotly (interactive)")
     chart_height  = st.session_state.setdefault("chart_height", 620)
     use_log_scale = st.session_state.setdefault("use_log_scale", False)
     inflation_rate = st.session_state.setdefault("inflation_rate", 0.025)
 
 else:
-    # Full controls for admins/analysts
     with st.sidebar.expander("Optional Display Settings"):
         chart_engine = st.radio(
             "Chart engine",
@@ -1001,38 +1389,54 @@ else:
                                          value=float(st.session_state.get("inflation_rate", 0.025)),
                                          step=0.001, format="%.3f", key="inflation_rate")
 
-    
-    
-# v6.11 hidding some elements of the Sidebar for VIEWERS - BEGIN
 
-# Value at Risk (VaR) Settings
+
+    with st.sidebar.expander("Actual portfolio (optional)"):
+        uploaded_actual = st.file_uploader(
+            "Upload CSV/XLSX with Date + Value or Date + Return",
+            type=["csv", "xlsx"],
+            key="actual_upload",
+        )
+        st.checkbox("Show actual portfolio on chart", value=True, key="actual_show")
+        st.checkbox("Scale actuals to Initial Value", value=True, key="actual_scale_to_initial")
+
+        if uploaded_actual is not None:
+            try:
+                parsed = parse_actual_upload(uploaded_actual)
+                st.session_state["actual_series_base1"] = parsed["base1"]
+                st.session_state["actual_first_value"] = parsed["first_value"]
+                st.session_state["actual_kind"] = parsed["kind"]
+                st.success(
+                    f"Loaded actuals {parsed['kind']} from "
+                    f"{parsed['start_end'][0].date()} to {parsed['start_end'][1].date()} "
+                    f"({len(parsed['base1'])} points)."
+                )
+            except Exception as e:
+                st.error(f"Could not parse actuals: {e}")
+
+    
 if not IS_VIEWER:
     with st.sidebar.expander("Value at Risk (VaR) Settings"):
         var_years      = st.slider("VaR Horizon (Years)", 1, 10, 1, key="var_years")
         var_confidence = st.slider("VaR Confidence Level (%)", 90, 99, 95, key="var_confidence")
         fat_tail_df    = st.slider("Tail Thickness (Student-t df)", 3, 30, 5, 1, key="fat_tail_df")
 else:
-    # Hidden defaults / persisted state for viewers
     var_years      = st.session_state.setdefault("var_years", 1)
     var_confidence = st.session_state.setdefault("var_confidence", 95)
     fat_tail_df    = st.session_state.setdefault("fat_tail_df", 5)
 
     
-# Efficient Frontier Parameters
 if not IS_VIEWER:
     with st.sidebar.expander("Efficient Frontier Parameters"):
         risk_free_rate = st.number_input("Risk-Free Rate", value=0.02, step=0.001, format="%.3f", key="risk_free_rate")
         show_cml = st.checkbox("Show Capital Market Line (CML)", value=True, key="show_cml")
         show_saa = st.checkbox("Show Current SAA Portfolio", value=True, key="show_saa")
 else:
-    # Hidden defaults for viewers
     risk_free_rate = st.session_state.setdefault("risk_free_rate", 0.02)
     show_cml       = st.session_state.setdefault("show_cml", True)
     show_saa       = st.session_state.setdefault("show_saa", True)
 
 
-
-# Optimization Parameters
 if not IS_VIEWER:
     with st.sidebar.expander("Optimization"):
         optimization_mode = st.radio("Optimization Mode", ["Max Return", "Min Volatility"], key="optimization_mode")
@@ -1040,22 +1444,14 @@ if not IS_VIEWER:
         min_return_limit = st.number_input("Min Return (for Min Volatility)", value=0.04, step=0.005, format="%.3f", key="min_return_limit")
         st.checkbox("Use Optimized Weights in Simulation", key="use_optimized_weights")
 else:
-    # Hidden defaults for viewers
     optimization_mode = st.session_state.setdefault("optimization_mode", "Max Return")
     max_vol_limit     = st.session_state.setdefault("max_vol_limit", 0.20)
     min_return_limit  = st.session_state.setdefault("min_return_limit", 0.04)
     st.session_state.setdefault("use_optimized_weights", False)
 
-# Always read the current toggle into a local var used later in the code
 use_optimized_weights = st.session_state.get("use_optimized_weights", False)
 
 
-
-
-# Scenario Analysis
-# --- Scenario Analysis (SIDEBAR) ---
-# Hide the entire sidebar box for viewers. Keep admin/analyst exactly as-is.
-# Also define defaults so later code (run_scenario) always has these names available.
 selected_scenario = None
 scenarios_df = None
 
@@ -1075,25 +1471,18 @@ if not IS_VIEWER:
             except Exception as e:
                 st.error(f"Error reading scenario file: {e}")
 
-        # Fallback to preloaded if no upload or empty
         if scenarios_df is None:
             _default_scen = st.session_state.get("default_scenarios_df")
             if _default_scen is not None and not _default_scen.empty:
                 st.caption("Using preloaded baseline scenarios")
                 scenarios_df = _default_scen.copy()
 
-        # Only show the picker if scenarios exist
         if scenarios_df is not None and not scenarios_df.empty:
             scenario_names = scenarios_df.iloc[:, 0].astype(str).tolist()
             selected_scenario = st.selectbox("Select Scenario", scenario_names)
 
 else:
-    # Viewers: no sidebar UI; force this off since viewers can’t optimize anyway
     st.session_state.setdefault("use_opt_in_scenario", False)
-
-
-# v6.11 hidding some elements of the Sidebar for VIEWERS - BEGIN
-
 
 
 st.sidebar.markdown(
@@ -1114,10 +1503,6 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
-
-
-# --- LTCMA (live editor, no Apply) ---
-
 DEFAULT_LTCMA = pd.DataFrame({
     "Exp Return": [0.06, 0.03, 0.08],
     "Exp Volatility": [0.10, 0.05, 0.15],
@@ -1127,15 +1512,6 @@ DEFAULT_LTCMA = pd.DataFrame({
 }, index=["Equities", "Bonds", "Alternatives"])
 
 
-
-
-
-#v6.2 NEW VERSION ADDITION   BEGIN
-
-# ===== LTCMA & CORRELATION — Admin editors, Viewer hidden =====
-
-
-# --- LTCMA ---
 if not IS_VIEWER:
     st.subheader("LTCMA Table")
 
@@ -1146,21 +1522,16 @@ if not IS_VIEWER:
         label_visibility="collapsed",
     )
 
-    # Base table for the editor
     if uploaded_ltcma is not None:
         base_ltcma = pd.read_excel(uploaded_ltcma, index_col=0)
-        # reset the widget state so the upload actually shows up
         st.session_state.pop("ltcma_widget", None)
     else:
-        # if the widget already has state, it will ignore this base
         base_ltcma = st.session_state.get("ltcma_base_default", DEFAULT_LTCMA)
 
-    # numeric hygiene
     for c in ["Exp Return", "Exp Volatility", "SAA", "Min", "Max"]:
         if c in base_ltcma.columns:
             base_ltcma[c] = pd.to_numeric(base_ltcma[c], errors="coerce").astype(float)
 
-    # live editor (admins/analysts can edit; viewers never see this editor)
     ltcma_return = st.data_editor(
         base_ltcma,
         num_rows="dynamic",
@@ -1169,11 +1540,9 @@ if not IS_VIEWER:
         key="ltcma_widget",
     )
 
-    # clean copy for calculations
     ltcma_df = ltcma_return.copy()
 
 else:
-    # VIEWER: prefer baseline from session; if missing, try disk; only then tiny fallback
     base_ltcma = st.session_state.get("ltcma_base_default")
     if base_ltcma is None:
         try:
@@ -1187,21 +1556,16 @@ else:
     ltcma_df = base_ltcma
 
 
-    
-
-# final LTCMA hygiene (shared)
 ltcma_df = ltcma_df.dropna(how="all")
 ltcma_df.index = ltcma_df.index.astype(str).str.strip()
 ltcma_df = ltcma_df.loc[ltcma_df.index != ""]
 
-# detect LTCMA changes → clear derived outputs
 _prev_ltcma = st.session_state.get("prev_ltcma_df")
 if _prev_ltcma is None or not ltcma_df.equals(_prev_ltcma):
     st.session_state["prev_ltcma_df"] = ltcma_df.copy()
     st.session_state.pop("portfolio_paths", None)
     st.session_state.pop("x_axis", None)
 
-# keep corr in lockstep with LTCMA assets
 new_assets = tuple(ltcma_df.index.tolist())
 prev_assets = st.session_state.get("corr_assets")
 if prev_assets is None or prev_assets != new_assets:
@@ -1211,7 +1575,6 @@ if prev_assets is None or prev_assets != new_assets:
     st.session_state["corr_assets"] = new_assets
     st.session_state.pop("corr_widget", None)
 
-# --- CORRELATION MATRIX ---
 if not IS_VIEWER:
     hcol, bcol = st.columns([6, 1])
     with hcol:
@@ -1230,7 +1593,6 @@ if not IS_VIEWER:
         label_visibility="collapsed",
     )
 
-    # load upload & reset widget to reflect it
     if uploaded_corr is not None:
         corr_store = pd.read_excel(uploaded_corr, index_col=0)
         st.session_state["corr_store"] = corr_store.copy()
@@ -1255,7 +1617,6 @@ if not IS_VIEWER:
         key="corr_widget",
     )
 
-    # gentle hint if not symmetric
     try:
         if not np.allclose(
             corr_return.values, corr_return.values.T, atol=1e-10, equal_nan=True
@@ -1270,7 +1631,6 @@ if not IS_VIEWER:
         np.fill_diagonal(sym.values, 1.0)
         st.session_state["corr_store"] = sym.copy()
         st.session_state["prev_corr_df"] = sym.copy()
-        # clear dependents and rebuild
         st.session_state.pop("portfolio_paths", None)
         st.session_state.pop("x_axis", None)
         st.session_state.pop("corr_widget", None)
@@ -1278,15 +1638,12 @@ if not IS_VIEWER:
 
     corr_matrix = corr_return.copy()
 else:
-    # VIEWER: no editor; use stored corr (or identity) aligned to LTCMA assets
     corr_matrix = ensure_corr_shape(
         ltcma_df.index, st.session_state.get("corr_store")
     ).astype(float)
 
-# always force diagonal to 1
 np.fill_diagonal(corr_matrix.values, 1.0)
 
-# persist clean copy & clear derived outputs if changed
 _prev_corr = st.session_state.get("prev_corr_df")
 if _prev_corr is None or not corr_matrix.equals(_prev_corr):
     st.session_state["prev_corr_df"] = corr_matrix.copy()
@@ -1294,11 +1651,8 @@ if _prev_corr is None or not corr_matrix.equals(_prev_corr):
     st.session_state.pop("portfolio_paths", None)
     st.session_state.pop("x_axis", None)
 
-# (Optional) If you want a minimal read-only “stats” view for viewers on ?view=stats:
 if IS_VIEWER and VIEW == "stats":
-    # viewer_back_link()
     st.subheader("Current portfolio statistics")
-    # quick summary using current SAA
     try:
         mu = ltcma_df["Exp Return"].values
         vols = ltcma_df["Exp Volatility"].values
@@ -1306,7 +1660,6 @@ if IS_VIEWER and VIEW == "stats":
         cov = np.outer(vols, vols) * corr_matrix.values
         exp_r = float(np.dot(w, mu))
         exp_v = float(np.sqrt(w @ cov @ w))
-
 
         rf = float(st.session_state.get("risk_free_rate", 0.03))  #v7.1.1 Sharpe Ratio
         sharpe = (exp_r - rf) / exp_v if exp_v > 0 else float("nan")
@@ -1318,8 +1671,6 @@ if IS_VIEWER and VIEW == "stats":
             st.metric("Expected Volatility", f"{exp_v:.2%}")
         with c3:
             st.metric("Sharpe (vs Rf)", f"{sharpe:.2f}", help=f"Risk-free: {rf:.2%}")
-
-
 
         df_pct = (ltcma_df[["SAA", "Exp Return", "Exp Volatility"]].copy() * 100)
 
@@ -1336,18 +1687,11 @@ if IS_VIEWER and VIEW == "stats":
     except Exception:
         pass
 
-#v6.2 NEW VERSION ADDITION   END
 
-
-    
-
-
-# Simulation Input Check
 if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_matrix.index):
     ltcma_df = ltcma_df.loc[ltcma_df.index.intersection(corr_matrix.index)]
 
     frequency_map = {"monthly": 12, "quarterly": 4, "yearly": 1}
-#    date_freq_map = {"monthly": "ME", "quarterly": "QE", "yearly": "YE"}
     steps_per_year = frequency_map[frequency]
     n_steps = n_years * steps_per_year
     dt = 1 / steps_per_year
@@ -1368,7 +1712,6 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
     if use_optimized_weights and "optimized_weights" in st.session_state:
         opt_weights = st.session_state["optimized_weights"]
         if isinstance(opt_weights, pd.Series):
-            # Align by index to current LTCMA table
             try:
                 weights_used = opt_weights.reindex(ltcma_df.index).fillna(0).values
             except Exception as e:
@@ -1386,34 +1729,23 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
     expected_portfolio_return = np.dot(weights_used, mu)
     expected_portfolio_volatility = np.sqrt(weights_used.T @ cov @ weights_used)
 
-
-    # v6 new design   BEGIN
-    # === ACTION LAUNCHER (buttons or viewer tiles) ===
     IS_VIEWER = (ROLE == "viewer")
     view = get_view_param("home")  # uses helpers you defined above
-
-    # v6.15
-    #if IS_VIEWER and view not in ("home", "", None):
-    #    viewer_back_link()
 
     if IS_VIEWER and view in ("sim", "ef", "stats"):
         viewer_back_link()
 
     if IS_VIEWER:
-        # Viewer home screen with 4 large image buttons
         if view in ("home", "", None):
             st.subheader("Executive Menu")
             r1c1, r1c2 = st.columns(2)
 
             with r1c1:
                 image_tile("View current portfolio statistics", "Data/Portfolio Statistics.png", "stats", height_px=230)
-                #tile_button("View current portfolio statistics", "Data/Portfolio Statistics.png", "stats", height_px=230)
 
             with r1c2:
                 image_tile("Run simulation paths", "Data/Simulations.png", "sim", height_px=230)
-                #tile_button("Run simulation paths", "Data/Simulations.png", "sim", height_px=230)
 
-            # ↓ Add a little vertical space between top and bottom rows
             st.markdown("<div style='height: 18px'></div>", unsafe_allow_html=True)
 
             r2c1, r2c2 = st.columns(2)
@@ -1427,20 +1759,16 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                            "Data/Stress Test Scenario.png",
                            "scen", height_px=230)
 
-            # Make sure nothing else triggers until the viewer picks an action
             run_sim = run_ef = run_opt = run_scenario = False
             show_stats = False
             st.stop()
 
-        # Viewer clicked a tile → set which block(s) below should run
         run_sim = (view == "sim")
         run_ef = (view == "ef")
-        run_opt = False  # viewers can’t optimize
+        run_opt = False 
         run_scenario = (view == "scen")
         show_stats = (view == "stats")
 
-        # v6.15
-        # ----- Viewer top bar on Scenario view: Back (left) + Scenario picker (right)
         if IS_VIEWER and view == "scen":
             tl, lbl_col, tr = st.columns([1, 1, 3])
             with tl:
@@ -1454,7 +1782,6 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
             with tr:
                 scen_df = st.session_state.get("default_scenarios_df")
                 if scen_df is None or scen_df.empty:
-                    # tiny fallback if baseline didn't pre-load for some reason
                     try:
                         scen_df = pd.read_excel(DEFAULT_BASELINE_SCENARIO_PATH)
                         st.session_state["default_scenarios_df"] = scen_df.copy()
@@ -1471,11 +1798,10 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                         "Scenario",
                         scenario_names,
                         index=scenario_names.index(current),
-                        key="viewer_scenario_select",            # reuse the same key as before
-                        label_visibility="collapsed"             # tidy UI; remove if you prefer the label
+                        key="viewer_scenario_select",
+                        label_visibility="collapsed"
                     )
 
-                    # keep ?scen=... in the URL so links/bookmarks work
                     try:
                         st.query_params.update({"scen": sel})
                     except Exception:
@@ -1485,14 +1811,7 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                 else:
                     st.warning("No scenarios available.")
 
-
-
-
-
-
-
     else:
-        # Admin / Analyst: keep the original 4 buttons
         col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
         with col1:
             run_sim = st.button("Run Simulation")
@@ -1505,17 +1824,6 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
         show_stats = False
 
 
-    # v6 new design   END
-
-
-
-
-
-
-
-
-
-    # Efficient Frontier
     if run_ef:
         bounds = list(zip(ltcma_df["Min"], ltcma_df["Max"]))
         results = []
@@ -1560,10 +1868,9 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
         pct0 = FuncFormatter(lambda v, pos: f"{v:.0%}")   # 0 decimals (e.g., 12%)
         pct1 = FuncFormatter(lambda v, pos: f"{v:.1%}")   # 1 decimal (e.g., 12.3%)
 
-        ax2.xaxis.set_major_formatter(pct0)  # Volatility as %
-        ax2.yaxis.set_major_formatter(pct1)  # Return as %
+        ax2.xaxis.set_major_formatter(pct0)  
+        ax2.yaxis.set_major_formatter(pct1)
 
-        # Put the chart in a centered, narrower column v6.10
         center_plot(fig2, ratio=(1, 4, 1), figsize=(10, 7))
         
         ef_buf = BytesIO()
@@ -1572,33 +1879,23 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
         st.download_button("Download Efficient Frontier Chart", data=ef_buf, file_name="efficient_frontier.png", mime="image/png")
 
   
-    # Simulate
     if run_sim:
 
-        # --- Fixed seed for reproducible simulations ---
-        # Change this number to any non-negative integer to get a different but still reproducible run.
-        # Acceptable values: any Python int >= 0 (e.g., 0, 1, 42, 20250826).
         SIMULATION_SEED = 20250826
         sim_rng = np.random.default_rng(SIMULATION_SEED)
-        # -----------------------------------------------
 
-
-        # choose weights for the sim
         weights_to_use = (
             st.session_state.get("optimized_weights").reindex(ltcma_df.index).fillna(0).values
             if use_optimized_weights and "optimized_weights" in st.session_state
             else ltcma_df["SAA"].values
         )
 
-        # pull inputs
         mu = ltcma_df["Exp Return"].values
         vols = ltcma_df["Exp Volatility"].values
 
-        # user correlation, aligned to LTCMA assets
         corr = corr_matrix.loc[ltcma_df.index, ltcma_df.index].values
         cov = np.outer(vols, vols) * corr
 
-        # expected stats for the summary tab, tied to the exact weights/cov used
         expected_portfolio_return = np.dot(weights_to_use, mu)
         expected_portfolio_volatility = np.sqrt(weights_to_use.T @ cov @ weights_to_use)
 
@@ -1607,7 +1904,6 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
         n_steps = n_years * steps_per_year
         dt = 1 / steps_per_year
 
-        # robust Cholesky for nearly PSD covariances
         try:
             chol = np.linalg.cholesky(cov)
         except np.linalg.LinAlgError:
@@ -1619,30 +1915,69 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
         # Student-t scaling so shocks have unit variance pre-correlation
         scale = np.sqrt(fat_tail_df / (fat_tail_df - 2))  # df > 2
 
+
+
+
+
+
+
+#        portfolio_paths = np.zeros((n_steps + 1, n_sims))
+#        portfolio_paths[0] = initial_value
+#
+#        progress_bar = st.progress(0)
+#        status_text = st.empty()
+#    
+#        for sim in range(n_sims):
+#            prices = np.ones(len(weights_to_use))
+#            path = [initial_value]
+#            for _ in range(n_steps):
+#                z = t.rvs(fat_tail_df, size=len(weights_to_use), random_state=sim_rng) / scale  # v4.0.2 : use a fixed seed for random generator
+#                correlated_z = chol @ z
+#                prices *= np.exp(mu * dt + correlated_z * np.sqrt(dt))
+#                path.append(np.dot(prices, weights_to_use) * initial_value)
+#            portfolio_paths[:, sim] = path
+#            # Update progress
+#            if sim % 100 == 0:
+#                progress_bar.progress((sim + 1) / n_sims)
+#                status_text.text(f"Simulation {sim + 1}/{n_sims}")
+
+
+
         portfolio_paths = np.zeros((n_steps + 1, n_sims))
         portfolio_paths[0] = initial_value
 
-        for sim in range(n_sims):
-            prices = np.ones(len(weights_to_use))
-            path = [initial_value]
-            for _ in range(n_steps):
-                z = t.rvs(fat_tail_df, size=len(weights_to_use), random_state=sim_rng) / scale  # v4.0.2 : use a fixed seed for random generator
-                correlated_z = chol @ z
-                prices *= np.exp(mu * dt + correlated_z * np.sqrt(dt))
-                path.append(np.dot(prices, weights_to_use) * initial_value)
-            portfolio_paths[:, sim] = path
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        prices = np.ones((len(weights_to_use), n_sims))  # Vectorisé
+
+        # v8 Vectorized calculations
+
+        for step in range(n_steps):
+            z = t.rvs(fat_tail_df, size=(len(weights_to_use), n_sims), random_state=sim_rng) / scale
+            correlated_z = chol @ z
+            prices *= np.exp(mu[:, None] * dt + correlated_z * np.sqrt(dt))
+            portfolio_paths[step + 1] = np.dot(weights_to_use, prices) * initial_value
+            if step % 1000 == 0:
+                progress_bar.progress((step + 1) / n_sims)
+                status_text.text(f"Simulation {step + 1}/{n_sims}")
+
+    
+
+
+
+
+
+
+
+        progress_bar.empty()
+        status_text.empty()
 
         st.session_state["portfolio_paths"] = portfolio_paths
 
-        # make the x-axis frequency match the chosen sim frequency
         freq_map = {"monthly": "ME", "quarterly": "QE", "yearly": "YE"}
         st.session_state["x_axis"] = pd.date_range(start=start_date, periods=n_steps + 1, freq=freq_map[frequency])
-
         st.session_state.simulation_has_run = True
-
-        #st.write("Weights used in simulation:")
-        #st.dataframe(pd.DataFrame({"Weight": weights_to_use}, index=ltcma_df.index))
-
 
         if not IS_VIEWER:
             with st.expander("Weights used in simulation", expanded=False):
@@ -1653,7 +1988,7 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                     column_config={"Weight (%)": st.column_config.NumberColumn(format="%.1f%%")},
                     width="stretch",
                 )
-
+       
 
     # Optimize
     if run_opt:
@@ -1690,12 +2025,6 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                 width="stretch",
             )
 
-
-            
-            #formatted_weights = pd.DataFrame({"Weight": opt_w}, index=ltcma_df.index)
-            #formatted_weights["Weight"] = formatted_weights["Weight"].map("{:.4f}".format)
-            #st.dataframe(formatted_weights)
-            
             fig_opt, ax_opt = plt.subplots()
             ax_opt.scatter(opt_v, opt_r, c='green', label='Optimized Portfolio')
             ax_opt.set_xlabel('Volatility')
@@ -1709,8 +2038,6 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
             pct1 = FuncFormatter(lambda v, pos: f"{v:.1%}")
             ax_opt.xaxis.set_major_formatter(pct0)
             ax_opt.yaxis.set_major_formatter(pct1)
-            
-            #st.pyplot(fig_opt)
             center_plot(fig_opt, ratio=(1, 4, 1), figsize=(10, 7))
 
             opt_buf = BytesIO()
@@ -1726,17 +2053,12 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
     # Stress Test Scenario
     if run_scenario:
 
-        # Make sure this exists for both roles
         use_opt_in_scenario = bool(st.session_state.get("use_opt_in_scenario", False))
 
-        # v6.15
-        # --- ensure scenarios_df and selected_scenario exist (viewer path) ---
         if IS_VIEWER:
-            # use the cached baseline scenarios if present
             if scenarios_df is None:
                 scenarios_df = st.session_state.get("default_scenarios_df")
 
-            # last-resort: load from disk so viewers still work
             if scenarios_df is None or scenarios_df.empty:
                 try:
                     scenarios_df = pd.read_excel(DEFAULT_BASELINE_SCENARIO_PATH)
@@ -1744,19 +2066,15 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                 except Exception:
                     scenarios_df = None
 
-            # if user hasn't picked yet, default to the first scenario
             if selected_scenario is None and scenarios_df is not None and not scenarios_df.empty:
                 scenario_names = scenarios_df.iloc[:, 0].astype(str).tolist()
                 if scenario_names:
                     selected_scenario = st.session_state.setdefault("viewer_scenario_select", scenario_names[0])
 
-
-        # For viewers, prefer the live value from session_state
         if IS_VIEWER:
             selected_scenario = st.session_state.get("viewer_scenario_select", selected_scenario)
         
         if scenarios_df is None:
-            #st.error("No scenario file uploaded. Please upload a CSV or Excel file with scenarios.")
             st.error("No scenarios available. Upload an Excel (.xlsx) in the sidebar (analyst/admin) or load the baseline.")
         elif selected_scenario is None:
             st.error("No scenario selected. Please select a scenario from the dropdown.")
@@ -1770,21 +2088,11 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                 st.error("Selected scenario not found in the scenario file.")
             else:
                 scenario_row = scenario_row.iloc[0, 1:]
-
-                # --- Align scenario vector to current LTCMA assets ---
-                # 1) normalize labels
                 scenario_row.index = scenario_row.index.astype(str).str.strip()
-                ltcma_assets = ltcma_df.index  # already stripped earlier
-
-                # 2) align to LTCMA; extras are silently dropped, missing are filled with 0
-                
-                #extra_assets = [c for c in scenario_row.index if c not in ltcma_assets]
+                ltcma_assets = ltcma_df.index
                 scenario_aligned = scenario_row.reindex(ltcma_assets)
                 missing_assets = scenario_aligned[scenario_aligned.isna()].index.tolist()
-                # scenario_aligned = scenario_aligned.fillna(0.0)
                 scenario_aligned = pd.to_numeric(scenario_aligned, errors="coerce").fillna(0.0)  #v6.11
-
-                # 3) choose weights as a Series aligned to LTCMA assets
                 if use_opt_in_scenario and "optimized_weights" in st.session_state:
                     weights_used = (
                         st.session_state["optimized_weights"]
@@ -1792,9 +2100,8 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                         .fillna(0.0)
                     )
                 else:
-                    weights_used = ltcma_df["SAA"]  # already indexed by ltcma_assets
+                    weights_used = ltcma_df["SAA"]
 
-                # 4) compute portfolio scenario return (both Series share index)
                 scenario_return = float((scenario_aligned * weights_used).sum())
 
                 if missing_assets:
@@ -1803,26 +2110,6 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                         + ", ".join(map(str, missing_assets))
                     )
 
-                # 6) build contribution table using aligned vectors
-                #impact_df = pd.DataFrame(
-                #    {
-                #        "Asset Class": ltcma_assets,
-                #        "Shock Return": scenario_aligned.values,
-                #        "Weight": weights_used.values,
-                #    },
-                #    index=ltcma_assets,
-                #)
-                #impact_df["Contribution"] = impact_df["Shock Return"] * impact_df["Weight"]
-
-                # Format numerical columns for display
-                #formatted_df = impact_df.copy()
-                #formatted_df["Shock Return"] = (formatted_df["Shock Return"] * 100).map("{:.2f}%".format)
-                #formatted_df["Contribution"] = (formatted_df["Contribution"] * 100).map("{:.2f}%".format)
-
-                #st.dataframe(formatted_df)
-
-
-                # 6) build contribution table using aligned vectors (no duplicate name column)
                 impact_df = pd.DataFrame(
                     {
                         "Shock Return": scenario_aligned.values,
@@ -1833,7 +2120,6 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                 impact_df.index.name = "Asset Class"
                 impact_df["Contribution"] = impact_df["Shock Return"] * impact_df["Weight"]
 
-                # Display with percentages
                 disp = pd.DataFrame(
                     {
                         "Weight (%)":        impact_df["Weight"] * 100,
@@ -1853,11 +2139,7 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                     width="stretch",
                 )
 
-                
-
                 # Waterfall chart of contributions (Plotly)
-                from plotly import graph_objects as go
-
                 labels   = list(impact_df.index) + ["Total"]
                 measures = ["relative"] * len(impact_df) + ["total"]
                 values   = list(impact_df["Contribution"].values) + [scenario_return]
@@ -1887,7 +2169,6 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                 span = mx - mn if mx != mn else max(abs(mx), 1.0)
                 pad = 0.2 * span
                 fig.update_yaxes(range=[mn - pad, mx + pad])
-    
 
                 st.plotly_chart(
                     fig,
@@ -1897,23 +2178,14 @@ if not ltcma_df.empty and not corr_matrix.empty and ltcma_df.index.equals(corr_m
                         "toImageButtonOptions": {"format": "png", "filename": "scenario_waterfall", "scale": 2},
                     },
                 )
-
                 st.markdown(f"**Portfolio Return under Scenario '{selected_scenario}':** {scenario_return:.2%}")
 
 
 
-
-# v6.9 Only display tabs for non Viewer users, unless if has just run a simulation
-
-# --- Tabs visibility control (hide for viewer unless on SIM view) ---
 SHOW_TABS = (ROLE != "viewer") or (VIEW == "sim")
 
-
-
-#v6.9 ------------------------------
 if SHOW_TABS:
 
-    # Create tabs (viewer gets no VaR tab)
     if IS_VIEWER:
         t_sim, t_sum, t_dd = st.tabs(
             ["Simulation Chart", "Summary Statistics", "Drawdown Analysis"]
@@ -1923,16 +2195,12 @@ if SHOW_TABS:
             ["Simulation Chart", "Summary Statistics", "Value at Risk", "Drawdown Analysis"]
         )
 
- 
-    # small helper: do we have data to render?
     has_data = (
         st.session_state.get("simulation_has_run")
         and isinstance(st.session_state.get("portfolio_paths"), np.ndarray)
         and st.session_state.get("x_axis") is not None
     )
 
-
-    # v5.2
     with t_sim:
         if not has_data:
             st.info("Run a simulation to see the chart.")
@@ -1940,23 +2208,58 @@ if SHOW_TABS:
             portfolio_paths = st.session_state["portfolio_paths"]
             x_axis = st.session_state["x_axis"]
 
-            # --- Percentiles ---
             p25 = np.percentile(portfolio_paths, 25, axis=1)
             p75 = np.percentile(portfolio_paths, 75, axis=1)
             p05 = np.percentile(portfolio_paths, 5, axis=1)
             p95 = np.percentile(portfolio_paths, 95, axis=1)
             p50 = np.median(portfolio_paths, axis=1)
 
-            # --- Targets (use elapsed years so the frequency switch is correct) ---
             periods_per_year = {"monthly": 12, "quarterly": 4, "yearly": 1}[frequency]
             n_steps = len(x_axis)
             years_elapsed = np.arange(n_steps) / periods_per_year
             two_x_line = np.full(n_steps, 2.0 * initial_value, dtype=float)
             compounded_double = 2.0 * initial_value * (1.0 + inflation_rate) ** years_elapsed
 
-            if chart_engine.startswith("Plotly"):
-                from plotly import graph_objects as go
 
+            # ==== Build actual-on-grid series (file-scale consistent + clip) ====
+            actual_x, actual_y = None, None
+            if st.session_state.get("actual_series_base1") is not None and st.session_state.get("actual_show", False):
+                s = st.session_state["actual_series_base1"].copy()  # base=1.0 at file's first row
+                s = s.sort_index()
+                s = s[~s.index.duplicated(keep="last")].astype(float)
+
+                # Resample to the sim frequency (month/quarter/year end) using your helper
+                s_freq = _resample_to_sim_freq(s, frequency)
+
+                # Place on the simulation grid; don't fill outside the actual data span
+                on_grid = s_freq.reindex(st.session_state["x_axis"])
+
+                first_idx = on_grid.first_valid_index()
+                last_idx  = on_grid.last_valid_index()
+                if first_idx is not None and last_idx is not None and first_idx <= last_idx:
+                    # Keep only the segment where we actually have data; fill inside that window
+                    seg = on_grid.loc[first_idx:last_idx].ffill()
+
+                    # Constant rebase:
+                    # - If "scale to initial" ON → multiply base1 by chart Initial Value
+                    # - Otherwise → multiply base1 by the file's first value (i.e., recover raw levels)
+                    scale = (
+                        float(st.session_state.get("initial_value", 100.0))
+                        if st.session_state.get("actual_scale_to_initial", True)
+                        else float(st.session_state.get("actual_first_value", 1.0))
+                    )
+                    if not np.isfinite(scale) or scale <= 0:
+                        scale = 1.0
+
+                    scaled_seg = seg * scale  # NO pin-to-first-grid rebase
+
+                    mask = scaled_seg.notna().values
+                    if mask.any():
+                        actual_x = scaled_seg.index[mask]
+                        actual_y = scaled_seg.values[mask]
+
+
+            if chart_engine.startswith("Plotly"):
                 def _positives(a):
                     a = np.asarray(a, float)
                     a[~np.isfinite(a)] = np.nan
@@ -1974,7 +2277,6 @@ if SHOW_TABS:
 
                 fig = go.Figure()
 
-                # 5–95 band
                 fig.add_trace(go.Scatter(x=x_axis, y=p95s, name="95th percentile",
                                          mode="lines", line=dict(width=1),
                                          hovertemplate="95th: %{y:,.0f}<extra></extra>"))
@@ -1982,7 +2284,6 @@ if SHOW_TABS:
                                          mode="lines", line=dict(width=1),
                                          fill="tonexty", fillcolor="rgba(100,149,237,0.15)",
                                          hovertemplate="5th: %{y:,.0f}<extra></extra>"))
-                # 25–75 band
                 fig.add_trace(go.Scatter(x=x_axis, y=p75s, name="75th percentile",
                                          mode="lines", line=dict(width=1),
                                          hovertemplate="75th: %{y:,.0f}<extra></extra>"))
@@ -1990,11 +2291,9 @@ if SHOW_TABS:
                                          mode="lines", line=dict(width=1),
                                          fill="tonexty", fillcolor="rgba(100,149,237,0.30)",
                                          hovertemplate="25th: %{y:,.0f}<extra></extra>"))
-                # Median
                 fig.add_trace(go.Scatter(x=x_axis, y=p50s, name="Median (50th)",
                                          mode="lines", line=dict(width=2, color="black"),
                                          hovertemplate="Median: %{y:,.0f}<extra></extra>"))
-                # Targets
                 if tgt_2x is not None:
                     fig.add_trace(go.Scatter(x=x_axis, y=tgt_2x, name="2x Initial Value",
                                              mode="lines", line=dict(dash="dash"),
@@ -2004,16 +2303,14 @@ if SHOW_TABS:
                                              mode="lines", line=dict(dash="dot"),
                                              hovertemplate="%{y:,.0f}<extra></extra>"))
 
-
-                 # Layout: title up top, legend below the chart (avoids overlap)
                 fig.update_layout(
                     height=chart_height,
                     title=dict(text="Portfolio Value Over Time", x=0.5),
-                    margin=dict(l=40, r=40, t=36, b=20),   # extra bottom space for multi-row legend
+                    margin=dict(l=40, r=40, t=36, b=20),
                     legend=dict(
                         orientation="h",
                         x=0.5, xanchor="center",
-                        y=-0.12, yanchor="top",              # place legend below plot area
+                        y=-0.12, yanchor="top", 
                         bgcolor="rgba(255,255,255,0.6)",
                         bordercolor="rgba(0,0,0,0.1)",
                         borderwidth=1
@@ -2023,7 +2320,6 @@ if SHOW_TABS:
 
                 fig.update_xaxes(title="Date", showspikes=True, spikemode="across", spikesnap="cursor")
                 if use_log_scale:
-                    # clamp the log axis to observed data
                     series = [p05s, p25s, p50s, p75s, p95s]
                     if tgt_2x is not None: series.append(tgt_2x)
                     if tgt_inf is not None: series.append(tgt_inf)
@@ -2034,7 +2330,6 @@ if SHOW_TABS:
                 else:
                     fig.update_yaxes(title="Portfolio Value")
 
-                # right-edge numeric labels
                 x_last = x_axis[-1]
                 def _annot(y):
                     if y is not None and np.isfinite(y[-1]):
@@ -2042,6 +2337,25 @@ if SHOW_TABS:
                                            showarrow=False, xanchor="left", yanchor="middle", xshift=8, font=dict(size=10))
                 for arr in (p95s, p75s, p50s, p25s, p05s):
                     _annot(arr)
+
+                if actual_x is not None:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=actual_x, y=actual_y,
+                            name="Actual portfolio",
+                            mode="lines+markers",
+                            line=dict(width=2),
+                            hovertemplate="Actual: %{y:,.0f}<extra></extra>"
+                        )
+                    )
+
+                # Lock x-axis to the simulation range (optionally keep a tiny pad on the right for labels)
+                x0 = st.session_state["x_axis"][0]
+                x1 = st.session_state["x_axis"][-1]
+                fig.update_xaxes(range=[x0, x1])  # no left drift before sim start
+
+                
+
 
                 st.plotly_chart(
                     fig, use_container_width=True,
@@ -2052,23 +2366,18 @@ if SHOW_TABS:
                 )
 
             else:
-                # ------- Matplotlib (static) -------
-
-                # --- Matplotlib version (matches v4.12.3 visuals) ---
                 if not has_data:
                     st.info("Run a simulation to see the chart.")
                 else:
                     portfolio_paths = st.session_state["portfolio_paths"]
                     x_axis = st.session_state["x_axis"]
             
-                    # Percentiles
                     p25 = np.percentile(portfolio_paths, 25, axis=1)
                     p75 = np.percentile(portfolio_paths, 75, axis=1)
                     p05 = np.percentile(portfolio_paths, 5, axis=1)
                     p95 = np.percentile(portfolio_paths, 95, axis=1)
                     median_path = np.median(portfolio_paths, axis=1)
 
-                    # Targets (v4.12.3 behavior: per-period compounding)
                     periods_per_year = {"monthly": 12, "quarterly": 4, "yearly": 1}[frequency]
                     n_steps = len(x_axis)
                     two_x_line = np.full(n_steps, 2 * initial_value, dtype=float)
@@ -2077,16 +2386,13 @@ if SHOW_TABS:
 
                     fig, ax = plt.subplots(figsize=(10, 6))
 
-                    # Log scale (same as v4.12.3)
                     if use_log_scale:
                         ax.set_yscale("log")
 
-                    # Percentile bands + median (colors & alphas like v4.12.3)
                     ax.plot(x_axis, median_path, color="blue", label="Median")
                     ax.fill_between(x_axis, p05, p95, color="lightblue", alpha=0.3, label="5–95%")
                     ax.fill_between(x_axis, p25, p75, color="blue", alpha=0.2, label="25–75%")
 
-                    # Optional targets
                     if show_double_initial:
                         ax.plot(x_axis, two_x_line, color="red", linestyle="--", linewidth=1, label="2x Initial Value")
 
@@ -2094,7 +2400,6 @@ if SHOW_TABS:
                         ax.plot(x_axis, compounded_double, color="darkorange", linestyle="--", linewidth=1,
                                 label="Inflation-Adj. 2x Target")
 
-                    # End-of-series labels (5/25/50/75/95) exactly like v4.12.3
                     label_fontsize = 8
                     x_last = x_axis[-1] + pd.Timedelta(days=15)
                     ax.text(x_last, median_path[-1], f"Median: {median_path[-1]:,.0f}", color="blue",
@@ -2108,7 +2413,6 @@ if SHOW_TABS:
                     ax.text(x_last, p95[-1], f"95th: {p95[-1]:,.0f}", color="lightblue",
                             fontsize=label_fontsize, va="center", ha="left", alpha=0.9)
 
-                    # Axes, grid, legend (same placements)
                     ax.set_title("Portfolio Value Over Time")
                     ax.set_xlabel("Date")
                     ax.set_ylabel("Portfolio Value (log scale)" if use_log_scale else "Portfolio Value")
@@ -2116,15 +2420,20 @@ if SHOW_TABS:
                     ax.legend()
                     plt.xticks(rotation=45)
 
-                    # Prevent crushed log view (v4 behavior)
                     if use_log_scale:
                         y_min = max(1e-6, min(p05.min(), p25.min(), median_path.min()))
                         ax.set_ylim(bottom=y_min * 0.9)
 
+                    if actual_x is not None:
+                        ax.plot(actual_x, actual_y, label="Actual portfolio", linewidth=2)
+                        ax.legend()
+
+                    ax.set_xlim(st.session_state["x_axis"][0], st.session_state["x_axis"][-1])
+                    ax.margins(x=0)  # no extra padding on the left
+
+
                     st.pyplot(fig)
 
-   
-            # -------- shared downloads (Excel) --------
             percentile_df = pd.DataFrame({
                 "5th Percentile": p05,
                 "25th Percentile": p25,
@@ -2144,35 +2453,29 @@ if SHOW_TABS:
             )
             paths_df.index.name = "Date"
 
-            perc_xlsx = BytesIO()
-            with pd.ExcelWriter(perc_xlsx, engine="xlsxwriter") as writer:
-                percentile_df.to_excel(writer, sheet_name="Percentile Paths")
-            perc_xlsx.seek(0)
 
-            paths_xlsx = BytesIO()
-            with pd.ExcelWriter(paths_xlsx, engine="xlsxwriter") as writer:
-                paths_df.to_excel(writer, sheet_name="Simulation Paths", index=True)
-            paths_xlsx.seek(0)
+            # --- Admin-only: FULL simulation paths export ---
+            if ROLE == "admin":
+                # (optional) checkbox so we only build on demand
+                if st.checkbox("Prepare FULL Simulation Paths (Excel) — large file", value=False, key="prep_paths_xlsx"):
+                    @st.cache_data
+                    def build_paths_xlsx(paths: np.ndarray, x_axis: pd.DatetimeIndex) -> bytes:
+                        df = pd.DataFrame(paths, index=x_axis, columns=[f"Sim_{i+1}" for i in range(paths.shape[1])])
+                        df.index.name = "Date"
+                        bio = BytesIO()
+                        with pd.ExcelWriter(bio, engine="xlsxwriter") as w:
+                            df.to_excel(w, sheet_name="Simulation Paths", index=True)
+                        return bio.getvalue()
 
-            c1, c2 = st.columns(2)
-            with c1:
-                st.download_button(
-                    "Download Percentile Paths (Excel)",
-                    data=perc_xlsx,
-                    file_name="percentile_paths.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_percentile_paths",
-                    disabled=not cap["downloads"]
-                )
-            with c2:
-                st.download_button(
-                    "Download Simulation Paths (Excel)",
-                    data=paths_xlsx,
-                    file_name="simulated_paths.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_paths_xlsx",
-                    disabled=not cap["downloads"]
-                )
+                    paths_bytes = build_paths_xlsx(portfolio_paths, x_axis)
+                    st.download_button(
+                        "Download Simulation Paths (Excel)",
+                        data=paths_bytes,
+                        file_name="simulated_paths.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="download_paths_xlsx",
+                    )
+
 
 
     with t_sum:
@@ -2206,30 +2509,23 @@ if SHOW_TABS:
                 fig_hist, ax_hist = plt.subplots(figsize=(5, 4))
                 final_values = portfolio_paths[-1]
 
-                # Calculate 1st and 99th percentiles to limit x-axis range
                 x_min, x_max = np.percentile(final_values, [1, 99])
-                # Plot histogram within these bounds
                 ax_hist.hist(final_values, bins=50, range=(0, x_max*1.5), color='skyblue', edgecolor='black')
-                # Set explicit x-axis limits
                 ax_hist.set_xlim(0, x_max*1.5)
             
                 ax_hist.set_title("Distribution of Final Portfolio Values")
                 ax_hist.set_xlabel("Final Value")
                 ax_hist.set_ylabel("Frequency")
 
-                # Download button for Final Value distribution
                 hist_buf = BytesIO()
                 fig_hist.savefig(hist_buf, format="png")
                 hist_buf.seek(0)
 
-                # Save to session state
                 st.session_state["fig_hist"] = fig_hist
                 st.session_state["buf_hist"] = hist_buf
 
-                # Display & download
                 st.pyplot(st.session_state["fig_hist"])
 
-                # Export final portfolio values to Excel
                 final_vals_df = pd.DataFrame({"Final Portfolio Value": final_values})
                 excel_buf_final = BytesIO()
                 with pd.ExcelWriter(excel_buf_final, engine="openpyxl") as writer:
@@ -2299,11 +2595,8 @@ if SHOW_TABS:
                         var_threshold = np.percentile(var_values, 100 - var_confidence)
                         fig_var, ax_var = plt.subplots(figsize=(5, 4))
 
-                        # Compute reasonable axis limits using percentiles
                         x_min, x_max = np.percentile(var_values, [1, 99])
-                        # Plot histogram within these bounds
                         ax_var.hist(var_values, bins=50, range=(x_min/2, x_max*1.5), color='lightgrey', edgecolor='black')
-                        # Explicitly set x-axis limits
                         ax_var.set_xlim(x_min/2, x_max*1.5)
 
                         ax_var.axvline(var_threshold, color='red', linestyle='--', label=f'{var_confidence}% VaR = {var_threshold:,.1f}')
@@ -2312,17 +2605,14 @@ if SHOW_TABS:
                         ax_var.set_ylabel("Frequency")
                         ax_var.legend()
 
-                        # Save buffer for download
                         var_buf = BytesIO()
                         fig_var.savefig(var_buf, format="png")
                         var_buf.seek(0)
                         st.session_state["fig_var"] = fig_var
                         st.session_state["buf_var"] = var_buf
 
-                        # Display and download
                         st.pyplot(fig_var)
 
-                        # Export final period returns for VaR to Excel
                         var_df = pd.DataFrame({"Final Period Return": var_values})
                         excel_buf_var = BytesIO()
                         with pd.ExcelWriter(excel_buf_var, engine="openpyxl") as writer:
@@ -2347,7 +2637,6 @@ if SHOW_TABS:
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                key="download_var_excel"
                            )
- 
             
                 else:
                     st.warning("VaR horizon exceeds simulation length. Increase investment horizon or reduce VaR years.")
@@ -2358,43 +2647,50 @@ if SHOW_TABS:
         else:
             portfolio_paths = st.session_state["portfolio_paths"]
             x_axis = st.session_state["x_axis"]
-
             st.subheader("Drawdown Statistics")
 
-            # Drawdown statistics
-            max_drawdowns = []
-            recovery_times = []
+#            max_drawdowns = []
+#            recovery_times = []
+
+            max_drawdowns, recovery_times = compute_drawdown_stats_vectorized(
+                tuple(map(tuple, portfolio_paths))
+            )
+
+
         
-            for sim in range(portfolio_paths.shape[1]):
-                path = portfolio_paths[:, sim]
+#            for sim in range(portfolio_paths.shape[1]):
+#                path = portfolio_paths[:, sim]
+#
+#                peak_val = path[0]
+#                peak_idx = 0
+#                max_dd = 0.0
+#                rec_time_for_max = np.nan
+#
+#                for i in range(1, len(path)):
+#                    if path[i] > peak_val:
+#                        peak_val = path[i]
+#                        peak_idx = i
+#
+#                    dd = 1.0 - path[i] / peak_val
+#
+#                    if dd > max_dd:
+#                        max_dd = dd
+#                        rec_time_for_max = np.nan
+#
+#                        for j in range(i + 1, len(path)):
+#                            if path[j] >= peak_val:
+#                                rec_time_for_max = j - peak_idx
+#                                break
+#
+#                max_drawdowns.append(max_dd)
+#                recovery_times.append(rec_time_for_max)
 
-                peak_val = path[0]
-                peak_idx = 0
-                max_dd = 0.0
-                rec_time_for_max = np.nan  # reset for this simulation
 
-                for i in range(1, len(path)):
-                    # update peak
-                    if path[i] > peak_val:
-                        peak_val = path[i]
-                        peak_idx = i
 
-                    # current drawdown from the most recent peak
-                    dd = 1.0 - path[i] / peak_val
 
-                    # found a deeper max drawdown → reset recovery to NaN and search ahead
-                    if dd > max_dd:
-                        max_dd = dd
-                        rec_time_for_max = np.nan  # Reset so we don’t carry over a prior recovery
 
-                        # look forward for recovery to that peak before end of series
-                        for j in range(i + 1, len(path)):
-                            if path[j] >= peak_val:
-                                rec_time_for_max = j - peak_idx
-                                break
 
-                max_drawdowns.append(max_dd)
-                recovery_times.append(rec_time_for_max)
+
 
             left_col_dd, right_col_dd = st.columns([1, 2])
 
@@ -2407,7 +2703,6 @@ if SHOW_TABS:
                 st.markdown(f"**75th Percentile Max Drawdown:** {np.percentile(max_drawdowns, 75):.1%}")
                 st.markdown(f"**95th Percentile Max Drawdown:** {np.percentile(max_drawdowns, 95):.1%}")
 
-                # recovery time stats only for simulations that actually recovered
                 rec_array = np.array(recovery_times, dtype=float)
                 recovered_mask = ~np.isnan(rec_array)
                 recovered_share = 100.0 * recovered_mask.mean()
@@ -2415,7 +2710,6 @@ if SHOW_TABS:
                 freq_label = {"monthly": "months", "quarterly": "quarters", "yearly": "years"}[frequency]
                 if recovered_mask.any():
                     st.markdown(f"**Average Recovery Time ({freq_label}, recovered only):** {np.nanmean(rec_array):.1f}")
-    #               st.markdown(f"**Median Recovery Time ({freq_label}, recovered only):** {np.nanmedian(rec_array):.1f}")
                 else:
                     st.markdown(f"**Average Recovery Time ({freq_label}, recovered only):** n/a")
 
@@ -2423,7 +2717,6 @@ if SHOW_TABS:
                             f"({recovered_mask.sum()} of {len(rec_array)})")
 
             with right_col_dd:
-                # Plot distribution of Max Drawdowns
                 fig_ddist, ax_ddist = plt.subplots(figsize=(6, 4))
                 ax_ddist.hist(max_drawdowns, bins=40, color='salmon', edgecolor='black')
                 ax_ddist.set_title("Distribution of Maximum Drawdowns")
@@ -2432,18 +2725,14 @@ if SHOW_TABS:
                 ax_ddist.xaxis.set_major_formatter(FuncFormatter(lambda y, _: f'{y:.0%}'))
                 ax_ddist.grid(True)
 
-                # Save buffer
                 ddist_buf = BytesIO()
                 fig_ddist.savefig(ddist_buf, format="png")
                 ddist_buf.seek(0)
                 st.session_state["fig_ddist"] = fig_ddist
                 st.session_state["buf_ddist"] = ddist_buf
 
-                # Display and download
-
                 st.pyplot(st.session_state["fig_ddist"])
 
-                # Export drawdown and recovery time data
                 drawdown_df = pd.DataFrame({
                     "Max Drawdown": max_drawdowns,
                     "Recovery Time": recovery_times
