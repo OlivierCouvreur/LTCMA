@@ -63,19 +63,32 @@ Dependencies:
 - Matplotlib
 
 
+
 IDEAS / SUGGESTIONS / TO-DO NEXT:
-v4.x
+
+DONE / ACTUAL REALISATIONS
 - Export portfolio paths to XL, not CSV --  DONE v4.11.5
 - change the layout to put all things related to the session into the sidebar --  DONE  v4.11.2
 - Toggle the Y axis for simulations between Linear and Log ?  -- DONE v4.12.0
-
-v5.x
+- v5.3: Add a password
+- v5.4: Add a Username/password with hashed value for stronger security
 - move some charts from Matplotlib to Plotly, to get better interactions for users
         Simulation chart: DONE
         v5.2 makes it optional, with a toggle between the Matplotlib and the Plotly version
-        
+- v6 new user interface for board members
 - incorporate the historical simulation part, meaning we need an interface to upload historical returns
-    this means finding a way to circumvent / or defining what to do when data is missing
+    this means finding a way to circumvent / or defining what to do when data is missing   DONE 7.2
+- v8 vectorized calculation, speed is now 250x faster!!!
+
+
+
+OTHER IDEAS
+
+- in the Optional Display Settings, for VIEWERS, put a Display Actual Portfolio Toggle, which means load the track record by default    
+- drop the progress bar, it's now so quick we don't need it anymore
+(went from 5k in 2 minutes, to 50k in 5 seconds !!!)
+- for ADMIN, add a button to load the Baseline
+- clean up the ADMIN options around Users, password,... too messy
 - potentially, change the interface to allow two portfolio comparison, sort of before/after
 - prepare a slim or stripped down version for demo and/or Retail clients
 - version multi langues?
@@ -86,9 +99,8 @@ v5.x
         maybe even give a timeline, like a big upcoming Cash Flow, to get back the proba to achieve it
         maybe, in optimizer, set this as a strict constraint (i need to reach this by then, with certainty / (or X% proba?) )
 
--v5.3: Add a password
--v5.4: Add a Username/password with hashed value for stronger security
--v6 new user interface for board members
+
+
 
 Author:
 -------
@@ -125,7 +137,7 @@ from urllib.parse import quote as urlquote
 AUTH_STORE_PATH = "Data/auth_store.json"
 
 
-APP_VERSION = "v8.0.1"
+APP_VERSION = "v8.1.0"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
@@ -1342,8 +1354,8 @@ n_years = st.sidebar.slider(
 
 n_sims = st.sidebar.slider(
     "Number of Simulations",
-    100, 5000,
-    step=100,
+    1000, 30000,
+    step=1000,
     key="n_sims",
     on_change=_invalidate_sim,
 )
@@ -2187,8 +2199,13 @@ SHOW_TABS = (ROLE != "viewer") or (VIEW == "sim")
 if SHOW_TABS:
 
     if IS_VIEWER:
-        t_sim, t_sum, t_dd = st.tabs(
-            ["Simulation Chart", "Summary Statistics", "Drawdown Analysis"]
+#        t_sim, t_sum, t_dd = st.tabs(
+#            ["Simulation Chart", "Summary Statistics", "Drawdown Analysis"]
+#        )
+
+#  v8.1
+        t_sim, t_dd = st.tabs(
+            ["Simulation Chart", "Drawdown Analysis"]
         )
     else:
         t_sim, t_sum, t_var, t_dd = st.tabs(
@@ -2476,80 +2493,85 @@ if SHOW_TABS:
                         key="download_paths_xlsx",
                     )
 
+    if not IS_VIEWER:
 
-
-    with t_sum:
-        if not has_data:
-            st.info("Run a simulation to see summary statistics.")
-        else:
-            portfolio_paths = st.session_state["portfolio_paths"]
-            x_axis = st.session_state["x_axis"]
+        with t_sum:
+            if not has_data:
+                st.info("Run a simulation to see summary statistics.")
+            else:
+                portfolio_paths = st.session_state["portfolio_paths"]
+                x_axis = st.session_state["x_axis"]
         
-            st.subheader("Summary Statistics")
+                st.subheader("Summary Statistics")
 
-            left_col_final, right_col_final = st.columns([1, 2])
+                left_col_final, right_col_final = st.columns([1, 2])
 
-            with left_col_final:
+                with left_col_final:
             
-                st.markdown(f"**Expected Return:** {expected_portfolio_return:.2%}")
-                st.markdown(f"**Expected Volatility:** {expected_portfolio_volatility:.2%}")
-                mean_final = np.mean(portfolio_paths[-1])
-                median_final = np.median(portfolio_paths[-1])
-                pctiles = np.percentile(portfolio_paths[-1], [5, 25, 75, 95])
-                st.markdown(f"**Final Value (Mean):** ${mean_final:,.0f}")
-                st.markdown(f"**5th Percentile :** ${pctiles[0]:,.0f}")
-                st.markdown(f"**25th Percentile :** ${pctiles[1]:,.0f}")
-                st.markdown(f"**Final Value (Median):** ${median_final:,.0f}")
-                st.markdown(f"**75th Percentile :** ${pctiles[2]:,.0f}")
-                st.markdown(f"**95th Percentile :** ${pctiles[3]:,.0f}")
+                    st.markdown(f"**Expected Return:** {expected_portfolio_return:.2%}")
+                    st.markdown(f"**Expected Volatility:** {expected_portfolio_volatility:.2%}")
+                    mean_final = np.mean(portfolio_paths[-1])
+                    median_final = np.median(portfolio_paths[-1])
+                    pctiles = np.percentile(portfolio_paths[-1], [5, 25, 75, 95])
+                    st.markdown(f"**Final Value (Mean):** ${mean_final:,.0f}")
+                    st.markdown(f"**5th Percentile :** ${pctiles[0]:,.0f}")
+                    st.markdown(f"**25th Percentile :** ${pctiles[1]:,.0f}")
+                    st.markdown(f"**Final Value (Median):** ${median_final:,.0f}")
+                    st.markdown(f"**75th Percentile :** ${pctiles[2]:,.0f}")
+                    st.markdown(f"**95th Percentile :** ${pctiles[3]:,.0f}")
                 
                 
-            with right_col_final:
+                with right_col_final:
 
-                fig_hist, ax_hist = plt.subplots(figsize=(5, 4))
-                final_values = portfolio_paths[-1]
+                    fig_hist, ax_hist = plt.subplots(figsize=(5, 4))
+                    final_values = portfolio_paths[-1]
 
-                x_min, x_max = np.percentile(final_values, [1, 99])
-                ax_hist.hist(final_values, bins=50, range=(0, x_max*1.5), color='skyblue', edgecolor='black')
-                ax_hist.set_xlim(0, x_max*1.5)
+                    x_min, x_max = np.percentile(final_values, [1, 99])
+                    ax_hist.hist(final_values, bins=50, range=(0, x_max*1.5), color='skyblue', edgecolor='black')
+                    ax_hist.set_xlim(0, x_max*1.5)
             
-                ax_hist.set_title("Distribution of Final Portfolio Values")
-                ax_hist.set_xlabel("Final Value")
-                ax_hist.set_ylabel("Frequency")
+                    ax_hist.set_title("Distribution of Final Portfolio Values")
+                    ax_hist.set_xlabel("Final Value")
+                    ax_hist.set_ylabel("Frequency")
 
-                hist_buf = BytesIO()
-                fig_hist.savefig(hist_buf, format="png")
-                hist_buf.seek(0)
+                    hist_buf = BytesIO()
+                    fig_hist.savefig(hist_buf, format="png")
+                    hist_buf.seek(0)
 
-                st.session_state["fig_hist"] = fig_hist
-                st.session_state["buf_hist"] = hist_buf
+                    st.session_state["fig_hist"] = fig_hist
+                    st.session_state["buf_hist"] = hist_buf
 
-                st.pyplot(st.session_state["fig_hist"])
+                    st.pyplot(st.session_state["fig_hist"])
 
-                final_vals_df = pd.DataFrame({"Final Portfolio Value": final_values})
-                excel_buf_final = BytesIO()
-                with pd.ExcelWriter(excel_buf_final, engine="openpyxl") as writer:
-                    final_vals_df.to_excel(writer, sheet_name="Final Values", index=False)
-                excel_buf_final.seek(0)
+                    final_vals_df = pd.DataFrame({"Final Portfolio Value": final_values})
+                    excel_buf_final = BytesIO()
+                    with pd.ExcelWriter(excel_buf_final, engine="openpyxl") as writer:
+                        final_vals_df.to_excel(writer, sheet_name="Final Values", index=False)
+                    excel_buf_final.seek(0)
 
-                left_button, right_button = st.columns([1, 1])
+                    left_button, right_button = st.columns([1, 1])
 
-                with left_button:
-                    st.download_button(
-                        label="Download Final Value Distribution Chart", key="download_final_value3",
-                        data=st.session_state["buf_hist"],
-                        file_name="final_value_distribution.png",
-                        mime="image/png"
-                    )
+                    with left_button:
+                        st.download_button(
+                            label="Download Final Value Distribution Chart", key="download_final_value3",
+                            data=st.session_state["buf_hist"],
+                            file_name="final_value_distribution.png",
+                            mime="image/png"
+                        )
 
-                with right_button:
-                    st.download_button(
-                        label="Download Final Values (Excel)",
-                        data=excel_buf_final,
-                        file_name="final_portfolio_values.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="download_final_values"
-                    )
+                    with right_button:
+                        st.download_button(
+                            label="Download Final Values (Excel)",
+                            data=excel_buf_final,
+                            file_name="final_portfolio_values.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_final_values"
+                        )
+
+
+
+
+
  
     if not IS_VIEWER:
         with t_var:
