@@ -137,12 +137,13 @@ from urllib.parse import quote as urlquote
 AUTH_STORE_PATH = "Data/auth_store.json"
 
 
-APP_VERSION = "v8.1.0"
+APP_VERSION = "v8.2.0"
 
 # ---- default data files (edit paths as needed) ----
 DEFAULT_LTCMA_PATH = "Data/LTCMA.xlsx"
 DEFAULT_CORR_PATH = "Data/Correlation Matrix.xlsx"
 DEFAULT_SCENARIO_PATH = "Data/Scenarios.xlsx"
+DEFAULT_TRACK_RECORD_PATH = "Data/Track Record.xlsx"
 
 DEFAULT_BASELINE_SESSION_PATH = "Data/baseline_session.pkl" 
 DEFAULT_BASELINE_SCENARIO_PATH = "Data/Scenarios.xlsx"
@@ -672,15 +673,49 @@ def _find_date_and_value_cols(df: pd.DataFrame) -> tuple[str, str, str]:
     else:
         return date_col, num_cols[0], "value"
 
-def parse_actual_upload(uploaded_file) -> dict:
-    """
-    Returns a dict with:
-      - 'base1': pd.Series indexed by datetime, normalized to base 1.0
-      - 'first_value': original first numeric level (if kind='value'), else 1.0 for returns
-      - 'kind': 'value' or 'return'
-      - 'start_end': (start_date, end_date)
-    """
-    df = _read_tabular_file(uploaded_file)
+#def parse_actual_upload(uploaded_file) -> dict:
+#    """
+#    Returns a dict with:
+#      - 'base1': pd.Series indexed by datetime, normalized to base 1.0
+#      - 'first_value': original first numeric level (if kind='value'), else 1.0 for returns
+#      - 'kind': 'value' or 'return'
+#      - 'start_end': (start_date, end_date)
+#    """
+#    df = _read_tabular_file(uploaded_file)
+#    date_col, num_col, kind = _find_date_and_value_cols(df)
+
+#    out = df[[date_col, num_col]].dropna()
+#    out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
+#    out = out.dropna(subset=[date_col]).sort_values(date_col)
+#    out = out.set_index(date_col)
+
+#    series = pd.to_numeric(out[num_col], errors="coerce").dropna()
+
+#    if kind == "return":
+#        # returns may be in %, detect and convert if needed
+#        med = series.abs().median()
+#        if med > 0.5:   # probably given in %
+#            series = series / 100.0
+#        base1 = (1.0 + series).cumprod()
+#        first_value = 1.0
+#    else:
+#        # level series -> normalize to base 1.0
+#        first_value = float(series.iloc[0])
+#        base1 = series / first_value
+
+#    base1.name = "Actual (base=1)"
+#    return {
+#        "base1": base1,
+#        "first_value": first_value,
+#        "kind": kind,
+#        "start_end": (base1.index.min(), base1.index.max()),
+#    }
+
+
+
+# v8.3
+def _parse_actual_df(df: pd.DataFrame) -> dict:
+    """Common parser used by both upload/path loaders."""
     date_col, num_col, kind = _find_date_and_value_cols(df)
 
     out = df[[date_col, num_col]].dropna()
@@ -691,14 +726,12 @@ def parse_actual_upload(uploaded_file) -> dict:
     series = pd.to_numeric(out[num_col], errors="coerce").dropna()
 
     if kind == "return":
-        # returns may be in %, detect and convert if needed
         med = series.abs().median()
         if med > 0.5:   # probably given in %
             series = series / 100.0
         base1 = (1.0 + series).cumprod()
         first_value = 1.0
     else:
-        # level series -> normalize to base 1.0
         first_value = float(series.iloc[0])
         base1 = series / first_value
 
@@ -709,6 +742,19 @@ def parse_actual_upload(uploaded_file) -> dict:
         "kind": kind,
         "start_end": (base1.index.min(), base1.index.max()),
     }
+
+# Update your existing upload parser to use the shared helper
+def parse_actual_upload(uploaded_file) -> dict:
+    df = _read_tabular_file(uploaded_file)
+    return _parse_actual_df(df)
+
+# NEW: path-based loader for VIEWERS
+def parse_actual_from_path(path: str) -> dict:
+    # works for .xls/.xlsx
+    df = pd.read_excel(path)
+    return _parse_actual_df(df)
+
+
 
 def _resample_to_sim_freq(s: pd.Series, frequency: str) -> pd.Series:
     """Resample to month/quarter/year end."""
@@ -1363,6 +1409,17 @@ n_sims = st.sidebar.slider(
 
 if IS_VIEWER:
     with st.sidebar.expander("Optional Display Settings"):
+
+        # Viewer checkbox for track record (ON by default)
+        actual_show = st.checkbox(
+            "Show Actual Track Record",
+            value=st.session_state.get("actual_show", False),
+            key="actual_show",
+            help="Displays the realized performance from the official track-record file."
+        )
+
+
+
         show_double_initial = st.checkbox(
             "Show Double Initial Value",
             value=st.session_state.get("show_double_initial", False),
@@ -1377,6 +1434,29 @@ if IS_VIEWER:
     chart_height  = st.session_state.setdefault("chart_height", 620)
     use_log_scale = st.session_state.setdefault("use_log_scale", False)
     inflation_rate = st.session_state.setdefault("inflation_rate", 0.025)
+
+
+    # Only load the file when the box is ON, and only once per path
+    if st.session_state.get("actual_show", False):
+        if st.session_state.get("_actual_loaded_path") != DEFAULT_TRACK_RECORD_PATH:
+            try:
+                parsed = parse_actual_from_path(DEFAULT_TRACK_RECORD_PATH)
+                st.session_state["actual_series_base1"] = parsed["base1"]
+                st.session_state["actual_first_value"] = parsed["first_value"]
+                st.session_state["actual_kind"] = parsed["kind"]
+                st.session_state["_actual_loaded_path"] = DEFAULT_TRACK_RECORD_PATH
+                st.session_state.setdefault("actual_scale_to_initial", True)  # viewer default
+                st.caption(
+                    f"Track record loaded "
+                    f"({parsed['start_end'][0].date()} → {parsed['start_end'][1].date()}, "
+                    f"{len(parsed['base1'])} points)."
+                )
+            except FileNotFoundError:
+                st.warning(f"Track record file not found: {DEFAULT_TRACK_RECORD_PATH}")
+            except Exception as e:
+                st.warning(f"Could not load track record: {e}")
+
+    
 
 else:
     with st.sidebar.expander("Optional Display Settings"):
